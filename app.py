@@ -7,7 +7,7 @@ from scipy.stats import f
 from sklearn.linear_model import Ridge
 import streamlit as st
 
-# --- Page Configuration ---
+# --- Page Setup ---
 st.set_page_config(
     page_title="Predictive Breeding & Quantitative Genetics Portal",
     page_icon="🌾",
@@ -16,9 +16,7 @@ st.set_page_config(
 
 st.title("🌾 Quantitative Genetics & Predictive Breeding Portal")
 st.markdown(
-    "Upload your breeding trial data to run **Multi-Location ANOVA**, **Line"
-    " × Tester Analysis (GCA/SCA)**, and **Predictive Breeding Value (GEBV)**"
-    " modeling."
+    "Upload your breeding trial dataset to generate **Location Boxplots**, **GCA/SCA Diverging Charts**, **Reaction Norm Plots**, and **GEBV Predictions**."
 )
 
 # --- File Upload Section ---
@@ -39,15 +37,12 @@ if uploaded_file is not None:
     df = load_data(uploaded_file)
     st.sidebar.success("Data successfully loaded!")
 
-    st.subheader("1. Variable Mapping & Verification")
-    st.write("Data Preview:", df.head(5))
+    st.subheader("1. Variable Setup")
+    st.write("Data Preview:", df.head(4))
 
     cols = df.columns.tolist()
 
-    # Sidebar Variable Selection
-    st.sidebar.header("Variable Mapping")
-
-    # Safe default column detection
+    # Smart Column Index Matcher
     def get_default_index(target_names, col_list, fallback=0):
       for name in target_names:
         for idx, col in enumerate(col_list):
@@ -66,6 +61,7 @@ if uploaded_file is not None:
         ["replication", "rep", "block"], cols, min(3, len(cols) - 1)
     )
 
+    st.sidebar.header("Variable Mapping")
     line_col = st.sidebar.selectbox("Line Column (Female):", cols, index=line_idx)
     tester_col = st.sidebar.selectbox(
         "Tester Column (Male):", cols, index=tester_idx
@@ -75,7 +71,7 @@ if uploaded_file is not None:
     )
     rep_col = st.sidebar.selectbox("Replication Column:", cols, index=rep_idx)
 
-    # Auto-generate Genotype_ID if not present
+    # Auto-generate Genotype_ID if missing
     if "Genotype_ID" not in df.columns:
       df["Genotype_ID"] = (
           df[line_col].astype(str) + " x " + df[tester_col].astype(str)
@@ -83,7 +79,6 @@ if uploaded_file is not None:
 
     genotype_col = "Genotype_ID"
 
-    # Identify Trait and Marker Columns
     available_traits = [
         c
         for c in cols
@@ -100,47 +95,73 @@ if uploaded_file is not None:
     marker_cols = [c for c in cols if c.startswith("M_")]
 
     if not trait_cols:
-      st.warning(
-          "Please select at least one numerical trait column from the sidebar."
-      )
+      st.warning("Select at least one numeric trait column in the sidebar.")
       st.stop()
 
-    selected_trait = st.selectbox("Primary Trait for Deep Analysis:", trait_cols)
+    selected_trait = st.selectbox("Primary Trait for Visualization:", trait_cols)
 
-    # Analysis Tabs
+    # Convert selected trait to float safely
+    df[selected_trait] = pd.to_numeric(df[selected_trait], errors="coerce")
+
+    # Tabs
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "🏢 Multi-Location ANOVA",
-        "🧬 Line × Tester (GCA/SCA)",
-        "🔥 GxE Heatmaps",
+        "🧬 Line × Tester (GCA / SCA)",
+        "📈 GxE Reaction Norms",
         "🔮 Predictive Breeding (GEBV)",
         "📥 Export Results",
     ])
 
     # ----------------------------------------------------
-    # TAB 1: Multi-Location ANOVA (Fixed Vector Math)
+    # TAB 1: Multi-Location ANOVA & Visuals
     # ----------------------------------------------------
     with tab1:
-      st.subheader(
-          f"Multi-Location Analysis of Variance (MET ANOVA): {selected_trait}"
-      )
+      st.subheader(f"Multi-Location Performance & ANOVA: {selected_trait}")
       try:
         data = df.dropna(
             subset=[env_col, genotype_col, rep_col, selected_trait]
         ).copy()
 
-        # Clean numerical conversion
-        data[selected_trait] = pd.to_numeric(
-            data[selected_trait], errors="coerce"
+        # Visual 1: Environment Trait Distribution Boxplot
+        fig_box = px.box(
+            data,
+            x=env_col,
+            y=selected_trait,
+            color=env_col,
+            points="all",
+            title=f"Distribution of {selected_trait} Across Trial Environments",
+            labels={
+                selected_trait: f"{selected_trait} Value",
+                env_col: "Environment / Location",
+            },
         )
-        data = data.dropna(subset=[selected_trait])
+        st.plotly_chart(fig_box, use_container_width=True)
 
+        # Visual 2: Mean Performance by Environment
+        env_means = (
+            data.groupby(env_col)[selected_trait]
+            .mean()
+            .reset_index()
+            .sort_values(by=selected_trait, ascending=False)
+        )
+        fig_env_bar = px.bar(
+            env_means,
+            x=env_col,
+            y=selected_trait,
+            color=selected_trait,
+            color_continuous_scale="Viridis",
+            title=f"Mean {selected_trait} by Location",
+            text_auto=".2f",
+        )
+        st.plotly_chart(fig_env_bar, use_container_width=True)
+
+        # ANOVA Table Computation
         grand_mean = data[selected_trait].mean()
         N = len(data)
         n_env = data[env_col].nunique()
         n_geno = data[genotype_col].nunique()
         n_rep = data[rep_col].nunique()
 
-        # Vectorized Row-Level Calculations (Index-Safe)
         data["E_mean"] = data.groupby(env_col)[selected_trait].transform(
             "mean"
         )
@@ -186,9 +207,10 @@ if uploaded_file is not None:
         F_GxE = MS_GxE / MS_Error if MS_Error > 0 else 0
         p_GxE = f.sf(F_GxE, df_GxE, df_Error)
 
+        st.write("### Multi-Location ANOVA Table")
         anova_table = pd.DataFrame({
             "Source of Variation": [
-                "Location/Environment (E)",
+                "Location / Environment (E)",
                 "Replication within Env R(E)",
                 "Genotype (G)",
                 "Genotype × Environment (GxE)",
@@ -222,43 +244,40 @@ if uploaded_file is not None:
             "F-Value": [np.nan, np.nan, F_Geno, F_GxE, np.nan, np.nan],
             "p-value": [np.nan, np.nan, p_Geno, p_GxE, np.nan, np.nan],
         })
-
         st.dataframe(
             anova_table.style.format(precision=4, na_rep=""),
             use_container_width=True,
         )
 
       except Exception as e:
-        st.error(
-            f"Could not calculate ANOVA: {e}. Check if Replication and"
-            " Location columns contain valid numerical/categorical groups."
-        )
+        st.error(f"Error calculating Multi-Location statistics: {e}")
 
     # ----------------------------------------------------
-    # TAB 2: Line x Tester (GCA & SCA)
+    # TAB 2: Line x Tester (Diverging GCA & SCA Charts)
     # ----------------------------------------------------
     with tab2:
-      st.subheader("Line × Tester Combining Ability Analysis")
+      st.subheader("Combining Ability Analysis (GCA & SCA Charts)")
       try:
         lt_data = df.dropna(
             subset=[line_col, tester_col, selected_trait]
         ).copy()
-        lt_data[selected_trait] = pd.to_numeric(
-            lt_data[selected_trait], errors="coerce"
-        )
-        lt_data = lt_data.dropna(subset=[selected_trait])
-
         overall_mean = lt_data[selected_trait].mean()
 
         # GCA Lines
         line_means = lt_data.groupby(line_col)[selected_trait].mean()
         gca_lines = (line_means - overall_mean).reset_index()
         gca_lines.columns = [line_col, "GCA_Line"]
+        gca_lines["Effect_Type"] = np.where(
+            gca_lines["GCA_Line"] >= 0, "Positive (+)", "Negative (-)"
+        )
 
         # GCA Testers
         tester_means = lt_data.groupby(tester_col)[selected_trait].mean()
         gca_testers = (tester_means - overall_mean).reset_index()
         gca_testers.columns = [tester_col, "GCA_Tester"]
+        gca_testers["Effect_Type"] = np.where(
+            gca_testers["GCA_Tester"] >= 0, "Positive (+)", "Negative (-)"
+        )
 
         # SCA Crosses
         cross_means = (
@@ -275,139 +294,193 @@ if uploaded_file is not None:
             - cross_means["GCA_Line"]
             - cross_means["GCA_Tester"]
         )
+        cross_means["Cross_Name"] = (
+            cross_means[line_col].astype(str)
+            + " × "
+            + cross_means[tester_col].astype(str)
+        )
 
         col1, col2 = st.columns(2)
+
         with col1:
-          st.write("### GCA Effects: Lines (Female Parents)")
-          st.dataframe(
-              gca_lines.sort_values(by="GCA_Line", ascending=False),
-              use_container_width=True,
-          )
+          st.write("### Female Line GCA Effects (Additive)")
           fig_gca_l = px.bar(
-              gca_lines,
-              x=line_col,
-              y="GCA_Line",
-              title="Line GCA Effects",
-              color="GCA_Line",
+              gca_lines.sort_values(by="GCA_Line"),
+              x="GCA_Line",
+              y=line_col,
+              orientation="h",
+              color="Effect_Type",
+              color_discrete_map={
+                  "Positive (+)": "#2ca02c",
+                  "Negative (-)": "#d62728",
+              },
+              title="Line GCA Effects (Diverging from Zero)",
+              text_auto=".2f",
           )
+          fig_gca_l.add_vline(x=0, line_width=1.5, line_dash="dash")
           st.plotly_chart(fig_gca_l, use_container_width=True)
 
         with col2:
-          st.write("### GCA Effects: Testers (Male Parents)")
-          st.dataframe(
-              gca_testers.sort_values(by="GCA_Tester", ascending=False),
-              use_container_width=True,
-          )
+          st.write("### Male Tester GCA Effects (Additive)")
           fig_gca_t = px.bar(
-              gca_testers,
-              x=tester_col,
-              y="GCA_Tester",
-              title="Tester GCA Effects",
-              color="GCA_Tester",
+              gca_testers.sort_values(by="GCA_Tester"),
+              x="GCA_Tester",
+              y=tester_col,
+              orientation="h",
+              color="Effect_Type",
+              color_discrete_map={
+                  "Positive (+)": "#1f77b4",
+                  "Negative (-)": "#ff7f0e",
+              },
+              title="Tester GCA Effects (Diverging from Zero)",
+              text_auto=".2f",
           )
+          fig_gca_t.add_vline(x=0, line_width=1.5, line_dash="dash")
           st.plotly_chart(fig_gca_t, use_container_width=True)
 
-        st.write("### SCA Effects: Crosses (Line × Tester Hybrids)")
-        sca_pivot = cross_means.pivot(
-            index=line_col, columns=tester_col, values="SCA_Cross"
+        st.write("### Hybrid Specific Combining Ability (SCA) Ranking")
+        top_sca = cross_means.sort_values(
+            by="SCA_Cross", ascending=False
+        ).head(15)
+        fig_sca_bar = px.bar(
+            top_sca,
+            x="Cross_Name",
+            y="SCA_Cross",
+            color="SCA_Cross",
+            color_continuous_scale="Tealrose",
+            title="Top Hybrids by Specific Combining Ability (SCA)",
+            text_auto=".2f",
         )
-        fig_sca = px.imshow(
-            sca_pivot,
-            text_auto=True,
-            color_continuous_scale="RdBu_r",
-            title="SCA Heatmap (Line x Tester Interactions)",
-        )
-        st.plotly_chart(fig_sca, use_container_width=True)
+        st.plotly_chart(fig_sca_bar, use_container_width=True)
 
       except Exception as e:
-        st.error(
-            f"Could not calculate Line × Tester effects: {e}. Please ensure Line"
-            " and Tester columns are properly mapped in the sidebar."
-        )
+        st.error(f"Error computing Line x Tester effects: {e}")
 
     # ----------------------------------------------------
-    # TAB 3: GxE Heatmaps
+    # TAB 3: GxE Reaction Norm Plots (Line Graph)
     # ----------------------------------------------------
     with tab3:
-      st.subheader("Genotype × Environment Interaction Heatmap")
+      st.subheader("Genotype × Environment Reaction Norms (Stability Plot)")
       try:
-        gxe_pivot = df.pivot_table(
-            index=genotype_col,
-            columns=env_col,
-            values=selected_trait,
-            aggfunc="mean",
+        gxe_df = (
+            df.groupby([genotype_col, env_col])[selected_trait]
+            .mean()
+            .reset_index()
         )
-        fig_gxe = px.imshow(
-            gxe_pivot,
-            color_continuous_scale="Viridis",
-            aspect="auto",
-            title=f"Mean Performance of {selected_trait} across Environments",
+
+        # Plot reaction norm lines across locations
+        fig_gxe_line = px.line(
+            gxe_df,
+            x=env_col,
+            y=selected_trait,
+            color=genotype_col,
+            markers=True,
+            title=(
+                f"Reaction Norm Plot: Stability of {selected_trait} Across"
+                " Locations"
+            ),
+            labels={
+                selected_trait: f"Mean {selected_trait}",
+                env_col: "Location / Environment",
+            },
         )
-        st.plotly_chart(fig_gxe, use_container_width=True)
+        fig_gxe_line.update_layout(hovermode="x unified")
+        st.plotly_chart(fig_gxe_line, use_container_width=True)
+
+        st.info(
+            "💡 **How to Read This Diagram:** Lines that stay horizontal and high"
+            " represent **stable, high-yielding genotypes**. Lines that cross over"
+            " heavily show strong **Genotype × Environment (GxE) interaction**."
+        )
+
       except Exception as e:
-        st.error(f"Unable to generate GxE Heatmap: {e}")
+        st.error(f"Unable to render Reaction Norm Plot: {e}")
 
     # ----------------------------------------------------
-    # TAB 4: Predictive Breeding (GEBV)
+    # TAB 4: Predictive Breeding (GEBV Scatter & Bar Charts)
     # ----------------------------------------------------
     with tab4:
-      st.subheader("Genomic Estimated Breeding Value (GEBV) Predictions")
+      st.subheader("Predictive Genomic Selection & GEBV Rankings")
 
       if marker_cols:
         try:
-          st.info(
-              f"Detected {len(marker_cols)} SNP markers starting with 'M_'."
-              " Running Ridge Regression (GBLUP Proxy)..."
-          )
           X = df[marker_cols].fillna(0)
-          y = pd.to_numeric(df[selected_trait], errors="coerce").fillna(
-              df[selected_trait].mean()
-          )
+          y = df[selected_trait].fillna(df[selected_trait].mean())
 
           model = Ridge(alpha=1.0)
           model.fit(X, y)
           df["Predicted_GEBV"] = model.predict(X)
 
-          gebv_rank = (
-              df.groupby(genotype_col)["Predicted_GEBV"].mean().reset_index()
-          )
-          gebv_rank = gebv_rank.sort_values(
-              by="Predicted_GEBV", ascending=False
-          )
+          col_p1, col_p2 = st.columns(2)
 
-          fig_gebv = px.bar(
-              gebv_rank.head(20),
-              x=genotype_col,
-              y="Predicted_GEBV",
-              title=(
-                  f"Top 20 Ranked Genotypes by Predicted GEBV ({selected_trait})"
-              ),
-              color="Predicted_GEBV",
-          )
-          st.plotly_chart(fig_gebv, use_container_width=True)
+          with col_p1:
+            st.write("### Model Accuracy: Observed vs Predicted GEBV")
+            fig_scatter = px.scatter(
+                df,
+                x=selected_trait,
+                y="Predicted_GEBV",
+                color=genotype_col,
+                trendline="ols",
+                title=(
+                    f"Observed {selected_trait} vs. Genomic Predicted Value"
+                ),
+                labels={
+                    selected_trait: f"Observed {selected_trait}",
+                    "Predicted_GEBV": "Predicted GEBV",
+                },
+            )
+            st.plotly_chart(fig_scatter, use_container_width=True)
+
+          with col_p2:
+            st.write("### Top Ranked Genotypes by GEBV")
+            gebv_rank = (
+                df.groupby(genotype_col)["Predicted_GEBV"].mean().reset_index()
+            )
+            gebv_rank = gebv_rank.sort_values(
+                by="Predicted_GEBV", ascending=False
+            ).head(15)
+
+            fig_gebv_bar = px.bar(
+                gebv_rank,
+                x="Predicted_GEBV",
+                y=genotype_col,
+                orientation="h",
+                color="Predicted_GEBV",
+                color_continuous_scale="Plasma",
+                title="Top 15 Genotypes Ranked by GEBV",
+                text_auto=".2f",
+            )
+            fig_gebv_bar.update_layout(yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(fig_gebv_bar, use_container_width=True)
+
         except Exception as e:
-          st.error(f"Error fitting GEBV model: {e}")
+          st.error(f"Error running GEBV predictions: {e}")
       else:
         st.info(
-            "No SNP marker columns starting with 'M_' were found. Showing"
-            " Genotype Phenotypic Means ranking instead."
+            "No SNP marker columns starting with 'M_' detected. Showing top"
+            " genotypes by observed phenotypic performance."
         )
         mean_rank = (
             df.groupby(genotype_col)[selected_trait]
             .mean()
             .reset_index()
             .sort_values(by=selected_trait, ascending=False)
+            .head(15)
         )
         fig_rank = px.bar(
-            mean_rank.head(20),
-            x=genotype_col,
-            y=selected_trait,
-            title=f"Top 20 Ranked Genotypes by Observed Mean ({selected_trait})",
+            mean_rank,
+            x=selected_trait,
+            y=genotype_col,
+            orientation="h",
+            color=selected_trait,
+            title=f"Top 15 Genotypes by Observed Mean {selected_trait}",
+            text_auto=".2f",
         )
+        fig_rank.update_layout(yaxis={"categoryorder": "total ascending"})
         st.plotly_chart(fig_rank, use_container_width=True)
 
     # ----------------------------------------------------
-    # TAB 5: Export All Results
+    # TAB 5: Export All Data
     # ----------------------------------------------------
     with tab5:
       st.subheader("Export Results to Excel Workbook")
@@ -422,20 +495,17 @@ if uploaded_file is not None:
           cross_means.to_excel(writer, sheet_name="SCA_Crosses", index=False)
 
       st.download_button(
-          label="📥 Download Complete Breeding Analysis Report (.xlsx)",
+          label="📥 Download Complete Quantitative Genetics Excel Report (.xlsx)",
           data=buffer.getvalue(),
           file_name="predictive_breeding_analysis_report.xlsx",
           mime="application/vnd.ms-excel",
       )
 
   except Exception as main_err:
-    st.error(
-        f"An error occurred while reading the dataset: {main_err}. Please"
-        " verify that your uploaded Excel/CSV file is properly formatted."
-    )
+    st.error(f"An error occurred while loading dataset: {main_err}")
 
 else:
   st.info(
-      "👈 Upload an Excel (.xlsx) or CSV (.csv) file in the left sidebar to"
-      " begin analysis."
+      "👈 Upload an Excel (.xlsx) or CSV (.csv) file in the sidebar to generate"
+      " diagrams and analysis."
   )
