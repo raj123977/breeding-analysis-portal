@@ -3,60 +3,92 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from scipy.stats import f
+from scipy.cluster.hierarchy import dendrogram, linkage
+from scipy.spatial.distance import pdist, squareform
+from scipy.stats import f, linregress
+from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.linear_model import Ridge
 import streamlit as st
 
-# --- Page Setup & Modern Styling ---
+# ==========================================
+# PAGE CONFIGURATION
+# ==========================================
 st.set_page_config(
-    page_title="Enterprise Predictive Breeding Portal",
+    page_title="Predictive Breeding & Parent Selection Portal",
     page_icon="🌾",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# Custom CSS for UI polish
+st.title("🌾 Predictive Breeding & Parent Selection Portal")
 st.markdown(
-    """
-    <style>
-    .metric-card {
-        background-color: #f8f9fa;
-        border-radius: 8px;
-        padding: 15px;
-        border-left: 5px solid #2e7d32;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-    }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        white-space: pre-wrap;
-        background-color: #f1f3f5;
-        border-radius: 6px 6px 0px 0px;
-        padding-top: 10px;
-        padding-bottom: 10px;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #2e7d32 !important;
-        color: white !important;
-    }
-    </style>
-""",
-    unsafe_allow_html=True,
+    "Enterprise Decision Support System for **Parental Breeding Value"
+    " Estimation (EBV/GEBV)**, **Diversity Clustering**, **GxE Finlay-Wilkinson"
+    " Stability**, and **Multi-Environment MET ANOVA**."
 )
 
-st.title("🌾 Quantitative Genetics & Predictive Breeding Portal")
-st.markdown(
-    "Advanced Analytics Engine for **Multi-Environment Trials (MET)**, **Line ×"
-    " Tester Combining Ability**, **GxE Stability**, and **Genomic Selection"
-    " (GEBV)**."
+
+# ==========================================
+# HELPER: GENERATE SAMPLE EXCEL TEMPLATE
+# ==========================================
+def generate_sample_template():
+  np.random.seed(42)
+  lines = [f"Line_{i:02d}" for i in range(1, 9)]
+  testers = [f"Tester_{j:02d}" for j in range(1, 4)]
+  envs = ["Env_North", "Env_South", "Env_Dry"]
+  reps = [1, 2]
+
+  data = []
+  for env in envs:
+    for rep in reps:
+      for line in lines:
+        for tester in testers:
+          yield_val = round(np.random.normal(6.5, 1.2), 2)
+          height_val = round(np.random.normal(110, 15), 1)
+          days_flower = int(np.random.normal(65, 4))
+          # Mock marker columns
+          m1 = np.random.choice([0, 1, 2])
+          m2 = np.random.choice([0, 1, 2])
+          m3 = np.random.choice([0, 1, 2])
+
+          data.append({
+              "Location": env,
+              "Replication": rep,
+              "Female_Line": line,
+              "Male_Tester": tester,
+              "Grain_Yield": yield_val,
+              "Plant_Height": height_val,
+              "Days_To_Flower": days_flower,
+              "M_Marker1": m1,
+              "M_Marker2": m2,
+              "M_Marker3": m3,
+          })
+
+  sample_df = pd.DataFrame(data)
+  buffer = io.BytesIO()
+  with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+    sample_df.to_excel(writer, sheet_name="Trial_Data", index=False)
+  return buffer.getvalue()
+
+
+# ==========================================
+# SIDEBAR CONTROL PANEL
+# ==========================================
+st.sidebar.header("📁 Data Input & Template")
+
+# Download Template Button
+template_bytes = generate_sample_template()
+st.sidebar.download_button(
+    label="📥 Download Sample Excel Template",
+    data=template_bytes,
+    file_name="predictive_breeding_sample_template.xlsx",
+    mime="application/vnd.ms-excel",
+    help="Download a correctly formatted sample Excel template to inspect the expected column structure.",
 )
 
-# --- File Upload Section ---
 uploaded_file = st.sidebar.file_uploader(
-    "Upload Trial Dataset (.xlsx or .csv)", type=["xlsx", "csv"]
+    "Upload Your Trial Dataset (.xlsx or .csv)", type=["xlsx", "csv"]
 )
 
 
@@ -70,11 +102,11 @@ def load_data(file):
 if uploaded_file is not None:
   try:
     df = load_data(uploaded_file)
-    st.sidebar.success("Data successfully loaded!")
+    st.sidebar.success("Data loaded successfully!")
 
     cols = df.columns.tolist()
 
-    # Smart Column Matcher
+    # Automatic Index Matching for Column Defaults
     def get_default_index(target_names, col_list, fallback=0):
       for name in target_names:
         for idx, col in enumerate(col_list):
@@ -82,12 +114,14 @@ if uploaded_file is not None:
             return idx
       return fallback
 
-    line_idx = get_default_index(["line", "female", "parent1"], cols, 0)
+    line_idx = get_default_index(
+        ["line", "female", "parent1", "mother"], cols, 0
+    )
     tester_idx = get_default_index(
-        ["tester", "male", "parent2"], cols, min(1, len(cols) - 1)
+        ["tester", "male", "parent2", "father"], cols, min(1, len(cols) - 1)
     )
     env_idx = get_default_index(
-        ["location", "loc", "env", "trial"], cols, min(2, len(cols) - 1)
+        ["location", "loc", "env", "site"], cols, min(2, len(cols) - 1)
     )
     rep_idx = get_default_index(
         ["replication", "rep", "block"], cols, min(3, len(cols) - 1)
@@ -103,275 +137,126 @@ if uploaded_file is not None:
     )
     rep_col = st.sidebar.selectbox("Replication Column:", cols, index=rep_idx)
 
-    # Generate Genotype_ID
-    if "Genotype_ID" not in df.columns:
-      df["Genotype_ID"] = (
-          df[line_col].astype(str) + " × " + df[tester_col].astype(str)
-      )
-
+    # Generate Genotype Cross Identifier
+    df["Genotype_ID"] = (
+        df[line_col].astype(str) + " × " + df[tester_col].astype(str)
+    )
     genotype_col = "Genotype_ID"
 
+    # Separate Trait columns from Marker columns
     available_traits = [
         c
         for c in cols
         if c not in [line_col, tester_col, env_col, rep_col, genotype_col]
         and not c.startswith("M_")
     ]
-    default_traits = [c for c in available_traits if "trait" in c.lower()] or (
+    default_traits = [c for c in available_traits if "yield" in c.lower()] or (
         [available_traits[0]] if available_traits else []
     )
 
     trait_cols = st.sidebar.multiselect(
-        "Select Target Traits:", available_traits, default=default_traits
+        "Target Trait(s):", available_traits, default=default_traits
     )
     marker_cols = [c for c in cols if c.startswith("M_")]
 
     if not trait_cols:
-      st.warning("⚠️ Please select at least one numerical trait column.")
+      st.warning("⚠️ Select at least one numeric trait column in the sidebar.")
       st.stop()
 
-    selected_trait = st.selectbox("🎯 Primary Focus Trait:", trait_cols)
-    df[selected_trait] = pd.to_numeric(df[selected_trait], errors="coerce")
+    primary_trait = st.selectbox("🎯 Primary Focus Trait:", trait_cols)
+    df[primary_trait] = pd.to_numeric(df[primary_trait], errors="coerce")
 
-    # Clean working dataset
+    # Clean subset
     clean_df = df.dropna(
-        subset=[env_col, genotype_col, rep_col, selected_trait]
+        subset=[env_col, genotype_col, rep_col, primary_trait]
     ).copy()
 
-    # --- Top Metric Dashboard Cards ---
-    st.markdown("### 📊 Dataset High-Level Summary")
+    # --- Top Dashboard Metrics ---
+    st.markdown("### 📊 Dataset Overview")
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Total Observations", len(clean_df))
-    m2.metric("Genotypes (Hybrids)", clean_df[genotype_col].nunique())
-    m3.metric("Environments", clean_df[env_col].nunique())
-    m4.metric("Replications", clean_df[rep_col].nunique())
+    m1.metric("Total Rows", len(clean_df))
+    m2.metric("Female Lines", clean_df[line_col].nunique())
+    m3.metric("Male Testers", clean_df[tester_col].nunique())
+    m4.metric("Environments", clean_df[env_col].nunique())
 
-    # Approximate Heritability (Broad-Sense H^2)
-    var_g = clean_df.groupby(genotype_col)[selected_trait].mean().var()
-    var_total = clean_df[selected_trait].var()
-    approx_h2 = (
-        min(max(var_g / var_total, 0.05), 0.95) if var_total > 0 else 0.0
-    )
-    m5.metric("Approx. Heritability (H²)", f"{approx_h2:.2f}")
+    # Calculate overall phenotype mean
+    mean_val = clean_df[primary_trait].mean()
+    m5.metric(f"Mean {primary_trait}", f"{mean_val:.2f}")
 
-    # --- Tab Navigation ---
-    tab0, tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "🌐 3D Trial Space",
-        "🏢 MET ANOVA & Performance",
-        "🧬 Line × Tester (GCA/SCA)",
-        "📈 GxE Reaction Norms",
-        "🔮 Predictive Selection (GEBV)",
-        "🕸️ Multi-Trait Profile",
+    # Navigation Tabs
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "📋 Excel Format & Data Inspector",
+        "🧬 Breeding Values (EBV/GEBV & GCA/SCA)",
+        "🌳 Diversity & Cluster Analysis",
+        "🌍 GxE Stability (Finlay-Wilkinson)",
+        "🕸️ Multi-Trait Selection Index",
         "📥 Export Reports",
     ])
 
     # ====================================================
-    # TAB 0: 3D Trial Space Overview
-    # ====================================================
-    with tab0:
-      st.subheader(
-          f"3D Multi-Environment Trial Visualization: {selected_trait}"
-      )
-      st.write(
-          "Explore the complete trial landscape across Genotypes, Locations,"
-          " and Observed Trait Values."
-      )
-
-      # 3D Scatter Visual
-      fig_3d_trial = px.scatter_3d(
-          clean_df,
-          x=env_col,
-          y=genotype_col,
-          z=selected_trait,
-          color=selected_trait,
-          size=selected_trait,
-          color_continuous_scale="Turbo",
-          title=f"3D Scatter: Environment vs Genotype vs {selected_trait}",
-          opacity=0.85,
-      )
-      fig_3d_trial.update_layout(
-          height=650, scene=dict(zaxis_title=selected_trait)
-      )
-      st.plotly_chart(fig_3d_trial, use_container_width=True)
-
-      with st.expander("📄 View Full Raw Trial Data Table"):
-        st.dataframe(clean_df, use_container_width=True)
-
-    # ====================================================
-    # TAB 1: Multi-Location ANOVA & Distribution
+    # TAB 1: EXCEL FORMAT GUIDE & DATA INSPECTOR
     # ====================================================
     with tab1:
-      st.subheader("Multi-Environment Trial (MET) ANOVA & Distribution")
+      st.subheader("📋 Dataset Inspection & Formatting Guidelines")
 
-      v_col1, v_col2 = st.columns(2)
+      col_guide, col_preview = st.columns([1, 1])
 
-      with v_col1:
-        st.write("#### Phenotypic Distribution Across Locations")
-        fig_violin = px.violin(
-            clean_df,
-            x=env_col,
-            y=selected_trait,
-            color=env_col,
-            box=True,
-            points="all",
-            color_discrete_sequence=px.colors.qualitative.Dark2,
-            title=f"Violin & Box Plot of {selected_trait} per Location",
-        )
-        st.plotly_chart(fig_violin, use_container_width=True)
+      with col_guide:
+        st.markdown("""
+                #### Recommended Excel Column Structure:
+                To achieve seamless analysis without errors, structure your input Excel file with the following columns:
+                
+                * **Female Line Column:** Name or ID of Female Parent (e.g., `Line_01`, `L_102`)
+                * **Male Tester Column:** Name or ID of Male Parent (e.g., `Tester_01`, `T_1`)
+                * **Environment / Location:** Trial location code (e.g., `Env_North`, `Loc_A`)
+                * **Replication / Block:** Numeric replication number (`1`, `2`, `3`)
+                * **Quantitative Trait Columns:** Yield, Days to Flower, Plant Height, etc.
+                * *(Optional) SNP Marker Columns:* Prefix marker columns with `M_` (e.g., `M_Marker1`, `M_SNP002` scored as 0, 1, 2) for Genomic Selection (GEBV).
+                """)
 
-      with v_col2:
-        st.write("#### Location Means & Standard Errors")
-        env_summary = (
-            clean_df.groupby(env_col)[selected_trait]
-            .agg(["mean", "std", "count"])
-            .reset_index()
-        )
-        env_summary["se"] = env_summary["std"] / np.sqrt(
-            env_summary["count"]
-        )
+      with col_preview:
+        st.write("#### Uploaded Data Sample (First 10 Rows)")
+        st.dataframe(clean_df.head(10), use_container_width=True)
 
-        fig_env_bar = px.bar(
-            env_summary,
-            x=env_col,
-            y="mean",
-            error_y="se",
-            color="mean",
-            color_continuous_scale="Viridis",
-            title=f"Mean {selected_trait} by Location (with Standard Error)",
-            text_auto=".2f",
-        )
-        st.plotly_chart(fig_env_bar, use_container_width=True)
-
-      # ANOVA Calculations
-      st.write("### Multi-Location ANOVA Table")
-      grand_mean = clean_df[selected_trait].mean()
-      N = len(clean_df)
-      n_env = clean_df[env_col].nunique()
-      n_geno = clean_df[genotype_col].nunique()
-      n_rep = clean_df[rep_col].nunique()
-
-      clean_df["E_mean"] = clean_df.groupby(env_col)[
-          selected_trait
-      ].transform("mean")
-      clean_df["G_mean"] = clean_df.groupby(genotype_col)[
-          selected_trait
-      ].transform("mean")
-      clean_df["R_E_mean"] = clean_df.groupby([env_col, rep_col])[
-          selected_trait
-      ].transform("mean")
-      clean_df["GE_mean"] = clean_df.groupby([env_col, genotype_col])[
-          selected_trait
-      ].transform("mean")
-
-      SS_Total = np.sum((clean_df[selected_trait] - grand_mean) ** 2)
-      SS_Env = np.sum((clean_df["E_mean"] - grand_mean) ** 2)
-      SS_Rep_Env = np.sum((clean_df["R_E_mean"] - clean_df["E_mean"]) ** 2)
-      SS_Geno = np.sum((clean_df["G_mean"] - grand_mean) ** 2)
-      SS_GxE = np.sum(
-          (
-              clean_df["GE_mean"]
-              - clean_df["E_mean"]
-              - clean_df["G_mean"]
-              + grand_mean
-          )
-          ** 2
-      )
-      SS_Error = max(0.0, SS_Total - (SS_Env + SS_Rep_Env + SS_Geno + SS_GxE))
-
-      df_Env = max(1, n_env - 1)
-      df_Rep_Env = max(1, n_env * (n_rep - 1))
-      df_Geno = max(1, n_geno - 1)
-      df_GxE = max(1, (n_geno - 1) * (n_env - 1))
-      df_Error = max(1, (N - 1) - (df_Env + df_Rep_Env + df_Geno + df_GxE))
-
-      MS_Env, MS_Rep_Env = SS_Env / df_Env, SS_Rep_Env / df_Rep_Env
-      MS_Geno, MS_GxE = SS_Geno / df_Geno, SS_GxE / df_GxE
-      MS_Error = SS_Error / df_Error if df_Error > 0 else 1e-6
-
-      F_Geno = MS_Geno / MS_GxE if MS_GxE > 0 else MS_Geno / MS_Error
-      p_Geno = f.sf(F_Geno, df_Geno, df_GxE if MS_GxE > 0 else df_Error)
-      F_GxE = MS_GxE / MS_Error if MS_Error > 0 else 0
-      p_GxE = f.sf(F_GxE, df_GxE, df_Error)
-
-      def get_stars(p):
-        if np.isnan(p):
-          return ""
-        if p < 0.001:
-          return "***"
-        if p < 0.01:
-          return "**"
-        if p < 0.05:
-          return "*"
-        return "ns"
-
-      anova_df = pd.DataFrame({
-          "Source of Variation": [
-              "Location/Environment (E)",
-              "Replication within Env R(E)",
-              "Genotype (G)",
-              "Genotype × Environment (GxE)",
-              "Residual Error",
-              "Total",
-          ],
-          "DF": [df_Env, df_Rep_Env, df_Geno, df_GxE, df_Error, N - 1],
-          "Sum of Squares (SS)": [
-              SS_Env,
-              SS_Rep_Env,
-              SS_Geno,
-              SS_GxE,
-              SS_Error,
-              SS_Total,
-          ],
-          "Mean Square (MS)": [
-              MS_Env,
-              MS_Rep_Env,
-              MS_Geno,
-              MS_GxE,
-              MS_Error,
-              np.nan,
-          ],
-          "F-Value": [np.nan, np.nan, F_Geno, F_GxE, np.nan, np.nan],
-          "p-Value": [np.nan, np.nan, p_Geno, p_GxE, np.nan, np.nan],
-          "Significance": [
-              "",
-              "",
-              get_stars(p_Geno),
-              get_stars(p_GxE),
-              "",
-              "",
-          ],
-      })
-      st.dataframe(
-          anova_df.style.format(
-              {"Sum of Squares (SS)": "{:.2f}", "Mean Square (MS)": "{:.2f}", "F-Value": "{:.2f}", "p-Value": "{:.4f}"},
-              na_rep="",
-          ),
-          use_container_width=True,
-      )
+      st.write("#### Data Summary Statistics")
+      st.dataframe(clean_df[trait_cols].describe().T, use_container_width=True)
 
     # ====================================================
-    # TAB 2: Line x Tester (GCA, SCA & 3D Surface)
+    # TAB 2: BREEDING VALUES (EBV/GEBV & GCA/SCA)
     # ====================================================
     with tab2:
-      st.subheader("Line × Tester Combining Ability & 3D Heterosis Analysis")
+      st.subheader(
+          f"Breeding Value Estimation & Combining Ability: {primary_trait}"
+      )
 
-      lt_df = clean_df.dropna(subset=[line_col, tester_col, selected_trait])
-      overall_mean = lt_df[selected_trait].mean()
+      lt_data = clean_df.dropna(
+          subset=[line_col, tester_col, primary_trait]
+      ).copy()
+      overall_trait_mean = lt_data[primary_trait].mean()
 
-      # GCA Calculation
-      gca_lines = (
-          lt_df.groupby(line_col)[selected_trait].mean() - overall_mean
-      ).reset_index()
-      gca_lines.columns = [line_col, "GCA_Line"]
+      # 1. GCA Female Lines
+      line_means = lt_data.groupby(line_col)[primary_trait].mean()
+      gca_lines = (line_means - overall_trait_mean).reset_index()
+      gca_lines.columns = [line_col, "GCA_Female"]
+      gca_lines["EBV_Female"] = (
+          overall_trait_mean + 2 * gca_lines["GCA_Female"]
+      )
+      gca_lines["Status"] = np.where(
+          gca_lines["GCA_Female"] >= 0, "Positive (+)", "Negative (-)"
+      )
 
-      gca_testers = (
-          lt_df.groupby(tester_col)[selected_trait].mean() - overall_mean
-      ).reset_index()
-      gca_testers.columns = [tester_col, "GCA_Tester"]
+      # 2. GCA Male Testers
+      tester_means = lt_data.groupby(tester_col)[primary_trait].mean()
+      gca_testers = (tester_means - overall_trait_mean).reset_index()
+      gca_testers.columns = [tester_col, "GCA_Male"]
+      gca_testers["EBV_Male"] = overall_trait_mean + 2 * gca_testers["GCA_Male"]
+      gca_testers["Status"] = np.where(
+          gca_testers["GCA_Male"] >= 0, "Positive (+)", "Negative (-)"
+      )
 
-      # Crosses & SCA
+      # 3. SCA Hybrids/Crosses
       cross_means = (
-          lt_df.groupby([line_col, tester_col])[selected_trait]
+          lt_data.groupby([line_col, tester_col])[primary_trait]
           .mean()
           .reset_index()
       )
@@ -379,10 +264,10 @@ if uploaded_file is not None:
           gca_testers, on=tester_col
       )
       cross_means["SCA_Cross"] = (
-          cross_means[selected_trait]
-          - overall_mean
-          - cross_means["GCA_Line"]
-          - cross_means["GCA_Tester"]
+          cross_means[primary_trait]
+          - overall_trait_mean
+          - cross_means["GCA_Female"]
+          - cross_means["GCA_Male"]
       )
       cross_means["Cross_Name"] = (
           cross_means[line_col].astype(str)
@@ -390,348 +275,422 @@ if uploaded_file is not None:
           + cross_means[tester_col].astype(str)
       )
 
-      # --- 3D Surface Plot of Line x Tester Interaction ---
-      st.write("#### 3D Surface Plot: Line × Tester Trait Surface")
-      sca_pivot = cross_means.pivot(
-          index=line_col, columns=tester_col, values=selected_trait
-      )
+      # Genomic Selection (GEBV) via Ridge Regression if markers exist
+      has_gebv = False
+      if marker_cols:
+        try:
+          X = lt_data[marker_cols].fillna(0)
+          y = lt_data[primary_trait]
+          ridge_model = Ridge(alpha=1.0)
+          ridge_model.fit(X, y)
+          lt_data["Predicted_GEBV"] = ridge_model.predict(X)
+          has_gebv = True
+        except Exception as e:
+          st.error(f"Could not calculate GEBV: {e}")
 
-      fig_3d_lt = go.Figure(
-          data=[
-              go.Surface(
-                  z=sca_pivot.values,
-                  x=sca_pivot.columns.astype(str),
-                  y=sca_pivot.index.astype(str),
-                  colorscale="Viridis",
-              )
-          ]
-      )
-      fig_3d_lt.update_layout(
-          title="3D Hybrid Performance Surface (Female Line x Male Tester)",
-          scene=dict(
-              xaxis_title="Tester (Male)",
-              yaxis_title="Line (Female)",
-              zaxis_title=selected_trait,
-          ),
-          height=600,
-      )
-      st.plotly_chart(fig_3d_lt, use_container_width=True)
+      # VISUALIZATIONS (2D ONLY)
+      c1, c2 = st.columns(2)
 
-      # Diverging GCA Charts
-      gca_col1, gca_col2 = st.columns(2)
-      with gca_col1:
-        gca_lines["Type"] = np.where(
-            gca_lines["GCA_Line"] >= 0, "Positive", "Negative"
-        )
+      with c1:
+        st.write("#### Female Lines GCA Effects (Additive Value)")
         fig_gcal = px.bar(
-            gca_lines.sort_values(by="GCA_Line"),
-            x="GCA_Line",
+            gca_lines.sort_values(by="GCA_Female"),
+            x="GCA_Female",
             y=line_col,
             orientation="h",
-            color="Type",
-            color_discrete_map={"Positive": "#2ca02c", "Negative": "#d62728"},
-            title="Line GCA Effects (Female Additive)",
+            color="Status",
+            color_discrete_map={
+                "Positive (+)": "#2ca02c",
+                "Negative (-)": "#d62728",
+            },
+            title="Female Parent GCA (Diverging from Zero)",
             text_auto=".2f",
         )
-        fig_gcal.add_vline(x=0, line_dash="dash")
+        fig_gcal.add_vline(x=0, line_dash="dash", line_color="black")
         st.plotly_chart(fig_gcal, use_container_width=True)
 
-      with gca_col2:
-        gca_testers["Type"] = np.where(
-            gca_testers["GCA_Tester"] >= 0, "Positive", "Negative"
-        )
+      with c2:
+        st.write("#### Male Testers GCA Effects (Additive Value)")
         fig_gcat = px.bar(
-            gca_testers.sort_values(by="GCA_Tester"),
-            x="GCA_Tester",
+            gca_testers.sort_values(by="GCA_Male"),
+            x="GCA_Male",
             y=tester_col,
             orientation="h",
-            color="Type",
-            color_discrete_map={"Positive": "#1f77b4", "Negative": "#ff7f0e"},
-            title="Tester GCA Effects (Male Additive)",
+            color="Status",
+            color_discrete_map={
+                "Positive (+)": "#1f77b4",
+                "Negative (-)": "#ff7f0e",
+            },
+            title="Male Parent GCA (Diverging from Zero)",
             text_auto=".2f",
         )
-        fig_gcat.add_vline(x=0, line_dash="dash")
+        fig_gcat.add_vline(x=0, line_dash="dash", line_color="black")
         st.plotly_chart(fig_gcat, use_container_width=True)
 
-      # SCA Heatmap
-      st.write("#### Specific Combining Ability (SCA) Matrix Heatmap")
-      sca_matrix = cross_means.pivot(
+      st.write("#### Hybrid Specific Combining Ability (SCA) Matrix Heatmap")
+      sca_pivot = cross_means.pivot(
           index=line_col, columns=tester_col, values="SCA_Cross"
       )
       fig_sca_hm = px.imshow(
-          sca_matrix,
+          sca_pivot,
           text_auto=".2f",
           color_continuous_scale="RdBu_r",
-          title="SCA Matrix (Specific Hybrid Combinations)",
+          title="SCA Heatmap (Line × Tester Specific Non-Additive Effects)",
+          aspect="auto",
       )
       st.plotly_chart(fig_sca_hm, use_container_width=True)
 
-      with st.expander("📄 View Full Line × Tester Statistics Table"):
-        st.dataframe(
-            cross_means[[
-                line_col,
-                tester_col,
-                selected_trait,
-                "GCA_Line",
-                "GCA_Tester",
-                "SCA_Cross",
-            ]],
-            use_container_width=True,
+      if has_gebv:
+        st.write("#### Genomic Estimated Breeding Values (GEBV) Validation")
+        fig_gebv = px.scatter(
+            lt_data,
+            x=primary_trait,
+            y="Predicted_GEBV",
+            color=line_col,
+            trendline="ols",
+            title=f"Observed {primary_trait} vs Genomic Predicted Value (GEBV)",
+            labels={
+                primary_trait: f"Observed {primary_trait}",
+                "Predicted_GEBV": "Predicted GEBV",
+            },
         )
+        st.plotly_chart(fig_gebv, use_container_width=True)
+
+      # TABULAR DATA
+      st.write("#### 📄 Complete Parental & Cross Combining Ability Table")
+      st.dataframe(
+          cross_means[[
+              "Cross_Name",
+              line_col,
+              tester_col,
+              primary_trait,
+              "GCA_Female",
+              "GCA_Male",
+              "SCA_Cross",
+          ]].sort_values(by="SCA_Cross", ascending=False),
+          use_container_width=True,
+      )
 
     # ====================================================
-    # TAB 3: GxE Reaction Norms & 3D Stability Space
+    # TAB 3: DIVERSITY & CLUSTER ANALYSIS
     # ====================================================
     with tab3:
-      st.subheader("Genotype × Environment Interaction & Stability Analysis")
-
-      gxe_df = (
-          clean_df.groupby([genotype_col, env_col])[selected_trait]
-          .mean()
-          .reset_index()
+      st.subheader("🌳 Genotypic Diversity & Cluster Analysis")
+      st.markdown(
+          "Group parents into genetic clusters based on performance profiles"
+          " or molecular markers to avoid crossing closely related parents."
       )
 
-      st.write("#### Reaction Norm Plot (Finlay-Wilkinson Adaptation)")
-      fig_rn = px.line(
-          gxe_df,
-          x=env_col,
-          y=selected_trait,
-          color=genotype_col,
-          markers=True,
-          title=f"Stability Profiles Across Locations: {selected_trait}",
-      )
-      st.plotly_chart(fig_rn, use_container_width=True)
+      # Prepare matrix for clustering (either traits or markers)
+      if marker_cols:
+        cluster_source = st.radio(
+            "Clustering Based On:",
+            ["Molecular Markers (M_)", "Phenotypic Trait Profiles"],
+            horizontal=True,
+        )
+      else:
+        cluster_source = "Phenotypic Trait Profiles"
 
-      # 3D Stability Space
-      st.write("#### 3D Genotype Stability & Performance Space")
-      stability_df = (
-          gxe_df.groupby(genotype_col)[selected_trait]
-          .agg(["mean", "std", "var"])
-          .reset_index()
-      )
-      stability_df["CV_pct"] = (
-          stability_df["std"] / stability_df["mean"]
-      ) * 100
-
-      fig_3d_stab = px.scatter_3d(
-          stability_df,
-          x="mean",
-          y="std",
-          z="CV_pct",
-          color="mean",
-          size="mean",
-          hover_name=genotype_col,
-          color_continuous_scale="Plasma",
-          title=(
-              "3D Stability Space: Mean Performance (X) vs Standard"
-              " Deviation (Y) vs CV% (Z)"
-          ),
-      )
-      fig_3d_stab.update_layout(height=600)
-      st.plotly_chart(fig_3d_stab, use_container_width=True)
-
-      with st.expander("📄 View Genotype Stability Summary Table"):
-        st.dataframe(
-            stability_df.sort_values(by="mean", ascending=False),
-            use_container_width=True,
+      if cluster_source == "Molecular Markers (M_)":
+        feat_df = clean_df.groupby(line_col)[marker_cols].mean().fillna(0)
+      else:
+        feat_df = (
+            clean_df.groupby(line_col)[trait_cols]
+            .mean()
+            .fillna(clean_df[trait_cols].mean())
         )
 
+      # K-Means Number of Clusters
+      n_clusters = st.slider("Select Number of Genetic Clusters (K):", 2, 6, 3)
+
+      # PCA for 2D Visualization
+      pca = PCA(n_components=2)
+      coords_2d = pca.fit_transform(feat_df)
+
+      kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+      cluster_labels = kmeans.fit_predict(feat_df)
+
+      pca_df = pd.DataFrame({
+          line_col: feat_df.index,
+          "PC1": coords_2d[:, 0],
+          "PC2": coords_2d[:, 1],
+          "Cluster": [f"Cluster {c+1}" for c in cluster_labels],
+      })
+
+      col_div1, col_div2 = st.columns(2)
+
+      with col_div1:
+        st.write("#### 2D Genetic Diversity PCA Plot")
+        fig_pca_2d = px.scatter(
+            pca_df,
+            x="PC1",
+            y="PC2",
+            color="Cluster",
+            text=line_col,
+            title="2D Principal Component Diversity Space",
+            color_discrete_sequence=px.colors.qualitative.Set1,
+        )
+        fig_pca_2d.update_traces(
+            textposition="top center", marker=dict(size=12)
+        )
+        st.plotly_chart(fig_pca_2d, use_container_width=True)
+
+      with col_div2:
+        st.write("#### Pairwise Euclidean Distance Matrix Heatmap")
+        dist_matrix = squareform(pdist(feat_df, metric="euclidean"))
+        dist_df = pd.DataFrame(
+            dist_matrix, index=feat_df.index, columns=feat_df.index
+        )
+
+        fig_dist = px.imshow(
+            dist_df,
+            color_continuous_scale="Viridis_r",
+            title="Pairwise Distance Heatmap (Yellow = High Diversity)",
+            aspect="auto",
+        )
+        st.plotly_chart(fig_dist, use_container_width=True)
+
+      st.write("#### 📄 Cluster Assignment Table")
+      st.dataframe(pca_df.sort_values(by="Cluster"), use_container_width=True)
+
     # ====================================================
-    # TAB 4: Predictive Breeding (GEBV & 3D Genomic PCA)
+    # TAB 4: GxE STABILITY (FINLAY-WILKINSON REGRESSION)
     # ====================================================
     with tab4:
       st.subheader(
-          "Genomic Estimated Breeding Value (GEBV) & Genomic Space"
+          f"🌍 Genotype × Environment Stability & Adaptation: {primary_trait}"
+      )
+      st.markdown(
+          "**Finlay-Wilkinson Joint Regression Model:** Evaluates parental"
+          " yield potential vs environmental sensitivity ($\beta_i$ slope)."
       )
 
-      if marker_cols:
-        st.info(
-            f"🧬 Found {len(marker_cols)} SNP Markers. Running Ridge"
-            " Regression & 3D PCA Population Structure Analysis..."
+      # Calculate Environmental Index (mean of each location minus grand mean)
+      env_means = clean_df.groupby(env_col)[primary_trait].mean()
+      grand_overall_mean = clean_df[primary_trait].mean()
+      env_index = env_means - grand_overall_mean
+
+      # Finlay-Wilkinson Regression per Line
+      fw_results = []
+      lines_list = clean_df[line_col].unique()
+
+      for l in lines_list:
+        sub = clean_df[clean_df[line_col] == l]
+        line_env_means = sub.groupby(env_col)[primary_trait].mean()
+
+        # Align series
+        aligned = (
+            pd.DataFrame({"Env_Index": env_index, "Line_Mean": line_env_means})
+            .dropna()
         )
 
-        X = clean_df[marker_cols].fillna(0)
-        y = clean_df[selected_trait].fillna(clean_df[selected_trait].mean())
-
-        # Fit Ridge GEBV
-        model = Ridge(alpha=1.0)
-        model.fit(X, y)
-        clean_df["Predicted_GEBV"] = model.predict(X)
-
-        # 3D PCA on Markers
-        pca = PCA(n_components=3)
-        pca_coords = pca.fit_transform(X)
-        clean_df["PC1"] = pca_coords[:, 0]
-        clean_df["PC2"] = pca_coords[:, 1]
-        clean_df["PC3"] = pca_coords[:, 2]
-
-        c1, c2 = st.columns(2)
-        with c1:
-          st.write("#### Observed vs Predicted GEBV Model Accuracy")
-          fig_acc = px.scatter(
-              clean_df,
-              x=selected_trait,
-              y="Predicted_GEBV",
-              color=genotype_col,
-              trendline="ols",
-              title="GEBV Prediction Accuracy Scatter",
+        if len(aligned) >= 2:
+          slope, intercept, r_val, p_val, std_err = linregress(
+              aligned["Env_Index"], aligned["Line_Mean"]
           )
-          st.plotly_chart(fig_acc, use_container_width=True)
+          line_mean_trait = aligned["Line_Mean"].mean()
 
-        with c2:
-          st.write("#### Top Selected Candidates by GEBV")
-          gebv_rank = (
-              clean_df.groupby(genotype_col)["Predicted_GEBV"]
-              .mean()
-              .reset_index()
-              .sort_values(by="Predicted_GEBV", ascending=False)
-              .head(15)
-          )
+          # Classification
+          if slope > 1.1:
+            adapt = "Favorable Environment Specialist (High Sensitivity)"
+          elif slope < 0.9:
+            adapt = "Stress Tolerant / Low-Input Specialist (Robust)"
+          else:
+            adapt = "Broadly Adapted (Stable Across Envs)"
 
-          fig_gebv_bar = px.bar(
-              gebv_rank,
-              x="Predicted_GEBV",
-              y=genotype_col,
-              orientation="h",
-              color="Predicted_GEBV",
-              color_continuous_scale="Viridis",
-              title="Top 15 Breeding Candidates (GEBV)",
-              text_auto=".2f",
-          )
-          fig_gebv_bar.update_layout(
-              yaxis={"categoryorder": "total ascending"}
-          )
-          st.plotly_chart(fig_gebv_bar, use_container_width=True)
+          fw_results.append({
+              line_col: l,
+              "Mean_Performance": line_mean_trait,
+              "Regression_Slope_Beta": slope,
+              "R2_Fit": r_val**2,
+              "Adaptation_Category": adapt,
+          })
 
-        # 3D Genomic PCA Space
-        st.write("#### 3D Genomic PCA Space Colored by Predicted GEBV")
-        fig_3d_pca = px.scatter_3d(
-            clean_df,
-            x="PC1",
-            y="PC2",
-            z="PC3",
-            color="Predicted_GEBV",
-            hover_name=genotype_col,
-            color_continuous_scale="Spectral",
-            title=(
-                "3D Population Structure (PC1 x PC2 x PC3) Overlayed with GEBV"
-            ),
+      fw_df = pd.DataFrame(fw_results)
+
+      c_fw1, c_fw2 = st.columns(2)
+
+      with c_fw1:
+        st.write("#### Finlay-Wilkinson Adaptation Scatter Chart")
+        fig_fw_scatter = px.scatter(
+            fw_df,
+            x="Regression_Slope_Beta",
+            y="Mean_Performance",
+            color="Adaptation_Category",
+            text=line_col,
+            title="Yield Mean vs Environmental Sensitivity (Slope β)",
+            labels={
+                "Regression_Slope_Beta": "Environmental Sensitivity (Slope β)",
+                "Mean_Performance": f"Mean {primary_trait}",
+            },
         )
-        fig_3d_pca.update_layout(height=600)
-        st.plotly_chart(fig_3d_pca, use_container_width=True)
-
-      else:
-        st.warning(
-            "⚠️ No SNP columns (starting with 'M_') were found in your"
-            " dataset. Showing phenotypic rank candidates instead."
+        fig_fw_scatter.add_vline(
+            x=1.0, line_dash="dash", annotation_text="Average Sensitivity β=1"
         )
-        pheno_rank = (
-            clean_df.groupby(genotype_col)[selected_trait]
+        fig_fw_scatter.add_hline(
+            y=grand_overall_mean,
+            line_dash="dash",
+            annotation_text="Overall Mean",
+        )
+        fig_fw_scatter.update_traces(
+            textposition="top center", marker=dict(size=10)
+        )
+        st.plotly_chart(fig_fw_scatter, use_container_width=True)
+
+      with c_fw2:
+        st.write("#### Reaction Norm Plot Across Environments")
+        gxe_line_df = (
+            clean_df.groupby([line_col, env_col])[primary_trait]
             .mean()
             .reset_index()
-            .sort_values(by=selected_trait, ascending=False)
-            .head(15)
         )
+        fig_rn = px.line(
+            gxe_line_df,
+            x=env_col,
+            y=primary_trait,
+            color=line_col,
+            markers=True,
+            title="Reaction Norms Across Trial Locations",
+        )
+        st.plotly_chart(fig_rn, use_container_width=True)
 
-        fig_pheno = px.bar(
-            pheno_rank,
-            x=selected_trait,
-            y=genotype_col,
-            orientation="h",
-            color=selected_trait,
-            color_continuous_scale="Cividis",
-            title=f"Top 15 Genotypes by Observed Mean {selected_trait}",
-            text_auto=".2f",
-        )
-        fig_pheno.update_layout(yaxis={"categoryorder": "total ascending"})
-        st.plotly_chart(fig_pheno, use_container_width=True)
+      st.write("#### 📄 Finlay-Wilkinson Stability & Adaptation Table")
+      st.dataframe(
+          fw_df.sort_values(by="Mean_Performance", ascending=False),
+          use_container_width=True,
+      )
 
     # ====================================================
-    # TAB 5: Multi-Trait Profile & Radar
+    # TAB 5: MULTI-TRAIT SELECTION INDEX
     # ====================================================
     with tab5:
-      st.subheader("Multi-Trait Correlations & Radar Profile")
+      st.subheader("🕸️ Multi-Trait Parental Selection Index & Radar Profile")
 
       if len(trait_cols) > 1:
-        tc1, tc2 = st.columns(2)
+        st.write(
+            "Assign relative economic weights to each target trait to calculate"
+            " a unified **Parental Selection Index Score**."
+        )
 
-        with tc1:
-          st.write("#### Trait Correlation Heatmap")
-          corr_matrix = clean_df[trait_cols].corr()
-          fig_corr = px.imshow(
-              corr_matrix,
+        weights = {}
+        w_cols = st.columns(len(trait_cols))
+        for idx, t in enumerate(trait_cols):
+          with w_cols[idx]:
+            weights[t] = st.slider(f"Weight for {t}:", -5.0, 5.0, 1.0, step=0.5)
+
+        # Standardize traits (Z-score)
+        parent_means = clean_df.groupby(line_col)[trait_cols].mean()
+        z_scores = (parent_means - parent_means.mean()) / parent_means.std()
+
+        # Compute Index Score
+        index_scores = np.zeros(len(parent_means))
+        for t in trait_cols:
+          index_scores += z_scores[t] * weights[t]
+
+        parent_means["Selection_Index_Score"] = index_scores
+        parent_means = parent_means.sort_values(
+            by="Selection_Index_Score", ascending=False
+        )
+
+        col_r1, col_r2 = st.columns(2)
+
+        with col_r1:
+          st.write("#### Top Selected Parents by Selection Index Score")
+          fig_index_bar = px.bar(
+              parent_means.head(10).reset_index(),
+              x="Selection_Index_Score",
+              y=line_col,
+              orientation="h",
+              color="Selection_Index_Score",
+              color_continuous_scale="Viridis",
+              title="Top 10 Parents Ranked by Multi-Trait Index",
               text_auto=".2f",
-              color_continuous_scale="Coolwarm",
-              title="Pairwise Trait Correlation Matrix",
           )
-          st.plotly_chart(fig_corr, use_container_width=True)
+          fig_index_bar.update_layout(
+              yaxis={"categoryorder": "total ascending"}
+          )
+          st.plotly_chart(fig_index_bar, use_container_width=True)
 
-        with tc2:
-          st.write("#### Top Genotypes Radar Comparison")
-          top_5_genos = (
-              clean_df.groupby(genotype_col)[selected_trait]
-              .mean()
-              .nlargest(5)
-              .index
-          )
-          radar_df = (
-              clean_df[clean_df[genotype_col].isin(top_5_genos)]
-              .groupby(genotype_col)[trait_cols]
-              .mean()
-          )
-
-          # Normalize 0-1 for radar overlay
-          radar_norm = (radar_df - radar_df.min()) / (
-              radar_df.max() - radar_df.min() + 1e-6
+        with col_r2:
+          st.write("#### Multi-Trait Radar Profile (Top 5 Parents)")
+          top_5_lines = parent_means.head(5).index
+          radar_norm = (
+              parent_means[trait_cols] - parent_means[trait_cols].min()
+          ) / (
+              parent_means[trait_cols].max()
+              - parent_means[trait_cols].min()
+              + 1e-6
           )
 
           fig_radar = go.Figure()
-          for g in radar_norm.index:
+          for line in top_5_lines:
             fig_radar.add_trace(
                 go.Scatterpolar(
-                    r=radar_norm.loc[g].values,
+                    r=radar_norm.loc[line].values,
                     theta=trait_cols,
                     fill="toself",
-                    name=str(g),
+                    name=str(line),
                 )
             )
           fig_radar.update_layout(
               polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
-              title="Normalized Multi-Trait Profile (Top 5 Genotypes)",
+              title="Normalized Radar Comparison",
           )
           st.plotly_chart(fig_radar, use_container_width=True)
+
+        st.write("#### 📄 Multi-Trait Selection Index Table")
+        st.dataframe(parent_means, use_container_width=True)
       else:
-        st.info("Select multiple target traits in the sidebar to enable Multi-Trait Profiling.")
+        st.info(
+            "💡 Please select multiple target traits in the sidebar to activate"
+            " the Multi-Trait Selection Index."
+        )
 
     # ====================================================
-    # TAB 6: Export & Excel Report
+    # TAB 6: EXPORT COMPREHENSIVE EXCEL REPORTS
     # ====================================================
     with tab6:
-      st.subheader("📥 Export Complete Quantitative Analysis Report")
-      buffer = io.BytesIO()
-      with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-        clean_df.to_excel(writer, sheet_name="Clean_Trial_Data", index=False)
-        if "anova_df" in locals():
-          anova_df.to_excel(writer, sheet_name="MET_ANOVA", index=False)
-        if "cross_means" in locals():
-          cross_means.to_excel(writer, sheet_name="Line_x_Tester", index=False)
-        if "stability_df" in locals():
-          stability_df.to_excel(
-              writer, sheet_name="Genotype_Stability", index=False
+      st.subheader("📥 Export Master Predictive Breeding Report")
+      st.markdown(
+          "Download a complete multi-sheet Excel workbook containing all"
+          " statistical computations, breeding values, stability metrics, and"
+          " cluster assignments."
+      )
+
+      master_buffer = io.BytesIO()
+      with pd.ExcelWriter(master_buffer, engine="xlsxwriter") as writer:
+        clean_df.to_excel(writer, sheet_name="Raw_Trial_Data", index=False)
+        if "gca_lines" in locals():
+          gca_lines.to_excel(
+              writer, sheet_name="Female_Line_GCA_EBV", index=False
+          )
+          gca_testers.to_excel(
+              writer, sheet_name="Male_Tester_GCA_EBV", index=False
+          )
+          cross_means.to_excel(writer, sheet_name="SCA_Crosses", index=False)
+        if "pca_df" in locals():
+          pca_df.to_excel(writer, sheet_name="Genetic_Clusters", index=False)
+        if "fw_df" in locals():
+          fw_df.to_excel(writer, sheet_name="GxE_Stability_FW", index=False)
+        if "parent_means" in locals():
+          parent_means.to_excel(
+              writer, sheet_name="Selection_Index", index=True
           )
 
       st.download_button(
-          label="📥 Download Complete Quantitative Genetics Excel Report (.xlsx)",
-          data=buffer.getvalue(),
-          file_name="predictive_breeding_complete_report.xlsx",
+          label=(
+              "📥 Download Complete Multi-Sheet Master Breeding Report (.xlsx)"
+          ),
+          data=master_buffer.getvalue(),
+          file_name="Predictive_Breeding_Master_Report.xlsx",
           mime="application/vnd.ms-excel",
       )
 
-  except Exception as main_err:
-    st.error(f"❌ An unexpected error occurred: {main_err}")
+  except Exception as err:
+    st.error(f"❌ An error occurred during data analysis: {err}")
 
 else:
   st.info(
-      "👈 Please upload a trial dataset (.xlsx or .csv) in the left sidebar to"
-      " launch the analytics portal."
+      "👈 Upload an Excel (.xlsx) or CSV (.csv) trial file in the sidebar to"
+      " begin, or download the Sample Template to inspect the expected format."
   )
