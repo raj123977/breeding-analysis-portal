@@ -155,6 +155,10 @@ if uploaded_file is not None:
     )
     rep_col = st.sidebar.selectbox("Replication / Block:", cols, index=rep_idx)
 
+    # Ensure parent identifiers are string types to prevent duplicate index type mismatches
+    df[line_col] = df[line_col].astype(str)
+    df[tester_col] = df[tester_col].astype(str)
+
     # Resolve Genotype ID
     if genotype_col_choice == "Auto-generate (Female × Male)":
       df["Genotype_ID"] = (
@@ -163,6 +167,7 @@ if uploaded_file is not None:
       genotype_col = "Genotype_ID"
     else:
       genotype_col = genotype_col_choice
+      df[genotype_col] = df[genotype_col].astype(str)
 
     # Trait and Marker Column Separation
     ignore_cols = [
@@ -199,7 +204,7 @@ if uploaded_file is not None:
 
     primary_trait = st.selectbox("🎯 Focus Trait for Prediction:", trait_cols)
 
-    # Numeric coercion
+    # Numeric coercion for traits
     for t in trait_cols:
       df[t] = pd.to_numeric(df[t], errors="coerce")
 
@@ -363,8 +368,12 @@ if uploaded_file is not None:
         st.plotly_chart(fig_gcat, use_container_width=True)
 
       st.write("#### Specific Combining Ability (SCA) Matrix Heatmap")
-      sca_pivot = cross_df.pivot(
-          index=line_col, columns=tester_col, values="SCA_Cross"
+      # FIX: Replaced .pivot with .pivot_table to safely handle duplicate entries
+      sca_pivot = cross_df.pivot_table(
+          index=line_col,
+          columns=tester_col,
+          values="SCA_Cross",
+          aggfunc="mean",
       )
       fig_sca_hm = px.imshow(
           sca_pivot,
@@ -390,7 +399,7 @@ if uploaded_file is not None:
       )
 
     # ====================================================
-    # TAB 3: IN-SILICO CROSS PREDICTION (THE CORE PREDICTIVE MODULE)
+    # TAB 3: IN-SILICO CROSS PREDICTION
     # ====================================================
     with tab3:
       st.subheader("🔮 In-Silico Cross Prediction Engine")
@@ -399,7 +408,7 @@ if uploaded_file is not None:
           " offspring value for **all possible future parental crosses** ($P_1"           " \\times P_2$) before executing them in the field."
       )
 
-      # Get unique list of candidate parents
+      # Unique list of candidate parents (string-cast)
       all_parents = sorted(
           list(
               set(clean_df[line_col].astype(str)).union(
@@ -408,7 +417,7 @@ if uploaded_file is not None:
           )
       )
 
-      # Build parental mean trait profile
+      # Build parental mean trait profile with duplicate index resolution
       line_trait_profile = clean_df.groupby(line_col)[trait_cols].mean()
       tester_trait_profile = clean_df.groupby(tester_col)[trait_cols].mean()
       parent_profile = (
@@ -431,7 +440,7 @@ if uploaded_file is not None:
         else:
           parent_ebvs[p] = overall_trait_mean
 
-      # Generate all pairwise combinations
+      # Pairwise combinations
       possible_crosses = list(itertools.combinations(all_parents, 2))
       cross_pred_data = []
 
@@ -452,11 +461,10 @@ if uploaded_file is not None:
         mid_parent_ebv = (ebv1 + ebv2) / 2.0
 
         # Divergence distance
-        if (
-            p1 in parent_dist_df.index
-            and p2 in parent_dist_df.columns
-        ):
+        if p1 in parent_dist_df.index and p2 in parent_dist_df.columns:
           gen_dist = parent_dist_df.loc[p1, p2]
+          if isinstance(gen_dist, pd.Series):
+            gen_dist = gen_dist.iloc[0]
         else:
           gen_dist = 0.0
 
@@ -468,12 +476,22 @@ if uploaded_file is not None:
         else:
           predicted_cross_gebv = mid_parent_ebv
 
-        # Check if cross was already tested in the dataset
+        # Check if cross was already tested in dataset
         tested_match = clean_df[
-            ((clean_df[line_col].astype(str) == p1) & (clean_df[tester_col].astype(str) == p2)) |
-            ((clean_df[line_col].astype(str) == p2) & (clean_df[tester_col].astype(str) == p1))
+            (
+                (clean_df[line_col].astype(str) == p1)
+                & (clean_df[tester_col].astype(str) == p2)
+            )
+            | (
+                (clean_df[line_col].astype(str) == p2)
+                & (clean_df[tester_col].astype(str) == p1)
+            )
         ]
-        status = "Already Tested" if not tested_match.empty else "Untested Hybrid Prediction"
+        status = (
+            "Already Tested"
+            if not tested_match.empty
+            else "Untested Hybrid Prediction"
+        )
 
         cross_pred_data.append({
             "Predicted_Cross": f"{p1} × {p2}",
