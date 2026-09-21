@@ -3,9 +3,8 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from scipy.cluster.hierarchy import dendrogram, linkage
 from scipy.spatial.distance import pdist, squareform
-from scipy.stats import f, linregress
+from scipy.stats import linregress
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.linear_model import Ridge
@@ -24,8 +23,8 @@ st.set_page_config(
 st.title("🌾 Predictive Breeding & Parent Selection Portal")
 st.markdown(
     "Enterprise Decision Support System for **Parental Breeding Value"
-    " Estimation (EBV/GEBV)**, **Diversity Clustering**, **GxE Finlay-Wilkinson"
-    " Stability**, and **Multi-Environment MET ANOVA**."
+    " Estimation (EBV/GEBV)**, **Diversity Clustering**, **GxE"
+    " Finlay-Wilkinson Stability**, and **Multi-Environment MET Analysis**."
 )
 
 
@@ -53,10 +52,11 @@ def generate_sample_template():
           m3 = np.random.choice([0, 1, 2])
 
           data.append({
-              "Location": env,
-              "Replication": rep,
+              "Genotype_ID": f"{line} × {tester}",
               "Female_Line": line,
               "Male_Tester": tester,
+              "Location": env,
+              "Replication": rep,
               "Grain_Yield": yield_val,
               "Plant_Height": height_val,
               "Days_To_Flower": days_flower,
@@ -104,9 +104,9 @@ if uploaded_file is not None:
     df = load_data(uploaded_file)
     st.sidebar.success("Data loaded successfully!")
 
-    cols = df.columns.tolist()
+    cols = [str(c) for c in df.columns.tolist()]
 
-    # Automatic Index Matching for Column Defaults
+    # Automatic Index Matching Helper
     def get_default_index(target_names, col_list, fallback=0):
       for name in target_names:
         for idx, col in enumerate(col_list):
@@ -114,20 +114,38 @@ if uploaded_file is not None:
             return idx
       return fallback
 
-    line_idx = get_default_index(
-        ["line", "female", "parent1", "mother"], cols, 0
+    st.sidebar.header("⚙️ Variable Mapping")
+
+    # 1. Genotype ID Mapping Option
+    geno_idx = get_default_index(
+        ["genotype", "entry", "hybrid", "variety"], cols, fallback=None
     )
-    tester_idx = get_default_index(
-        ["tester", "male", "parent2", "father"], cols, min(1, len(cols) - 1)
-    )
-    env_idx = get_default_index(
-        ["location", "loc", "env", "site"], cols, min(2, len(cols) - 1)
-    )
-    rep_idx = get_default_index(
-        ["replication", "rep", "block"], cols, min(3, len(cols) - 1)
+    genotype_options = ["Auto-generate from Female × Male"] + cols
+
+    if geno_idx is not None:
+      default_geno_choice = cols[geno_idx]
+      selected_geno_idx = genotype_options.index(default_geno_choice)
+    else:
+      selected_geno_idx = 0
+
+    genotype_col_choice = st.sidebar.selectbox(
+        "Genotype ID Column:", genotype_options, index=selected_geno_idx
     )
 
-    st.sidebar.header("⚙️ Variable Mapping")
+    # 2. Line & Tester Mapping
+    line_idx = get_default_index(
+        ["line", "female", "parent1", "mother"], cols, fallback=0
+    )
+    tester_idx = get_default_index(
+        ["tester", "male", "parent2", "father"], cols, fallback=min(1, len(cols) - 1)
+    )
+    env_idx = get_default_index(
+        ["location", "loc", "env", "site"], cols, fallback=min(2, len(cols) - 1)
+    )
+    rep_idx = get_default_index(
+        ["replication", "rep", "block"], cols, fallback=min(3, len(cols) - 1)
+    )
+
     line_col = st.sidebar.selectbox("Line Column (Female):", cols, index=line_idx)
     tester_col = st.sidebar.selectbox(
         "Tester Column (Male):", cols, index=tester_idx
@@ -137,49 +155,76 @@ if uploaded_file is not None:
     )
     rep_col = st.sidebar.selectbox("Replication Column:", cols, index=rep_idx)
 
-    # Generate Genotype Cross Identifier
-    df["Genotype_ID"] = (
-        df[line_col].astype(str) + " × " + df[tester_col].astype(str)
-    )
-    genotype_col = "Genotype_ID"
+    # Resolve Genotype ID Column
+    if genotype_col_choice == "Auto-generate from Female × Male":
+      df["Genotype_ID"] = (
+          df[line_col].astype(str) + " × " + df[tester_col].astype(str)
+      )
+      genotype_col = "Genotype_ID"
+    else:
+      genotype_col = genotype_col_choice
 
-    # Separate Trait columns from Marker columns
+    # Trait & Marker Column Separator
+    ignore_cols = [
+        line_col,
+        tester_col,
+        env_col,
+        rep_col,
+        genotype_col,
+        "Genotype_ID",
+    ]
     available_traits = [
         c
-        for c in cols
-        if c not in [line_col, tester_col, env_col, rep_col, genotype_col]
-        and not c.startswith("M_")
+        for c in df.columns
+        if c not in ignore_cols and not str(c).startswith("M_")
     ]
-    default_traits = [c for c in available_traits if "yield" in c.lower()] or (
-        [available_traits[0]] if available_traits else []
-    )
+    marker_cols = [c for c in df.columns if str(c).startswith("M_")]
+
+    if not available_traits:
+      st.error(
+          "❌ No numeric trait columns found in dataset. Please check your"
+          " file mapping."
+      )
+      st.stop()
+
+    default_traits = [c for c in available_traits if "yield" in str(c).lower()] or [
+        available_traits[0]
+    ]
 
     trait_cols = st.sidebar.multiselect(
         "Target Trait(s):", available_traits, default=default_traits
     )
-    marker_cols = [c for c in cols if c.startswith("M_")]
 
     if not trait_cols:
       st.warning("⚠️ Select at least one numeric trait column in the sidebar.")
       st.stop()
 
     primary_trait = st.selectbox("🎯 Primary Focus Trait:", trait_cols)
-    df[primary_trait] = pd.to_numeric(df[primary_trait], errors="coerce")
 
-    # Clean subset
+    # Clean numeric traits
+    for t in trait_cols:
+      df[t] = pd.to_numeric(df[t], errors="coerce")
+
+    # Clean subset dataframe
     clean_df = df.dropna(
-        subset=[env_col, genotype_col, rep_col, primary_trait]
+        subset=[env_col, genotype_col, primary_trait]
     ).copy()
 
-    # --- Top Dashboard Metrics ---
+    if clean_df.empty:
+      st.error(
+          "❌ Clean dataset is empty after dropping missing values. Please"
+          " verify column selection."
+      )
+      st.stop()
+
+    # --- Top Dashboard Overview Metrics ---
     st.markdown("### 📊 Dataset Overview")
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Total Rows", len(clean_df))
-    m2.metric("Female Lines", clean_df[line_col].nunique())
-    m3.metric("Male Testers", clean_df[tester_col].nunique())
-    m4.metric("Environments", clean_df[env_col].nunique())
+    m2.metric("Unique Genotypes", clean_df[genotype_col].nunique())
+    m3.metric("Female Lines", clean_df[line_col].nunique())
+    m4.metric("Male Testers", clean_df[tester_col].nunique())
 
-    # Calculate overall phenotype mean
     mean_val = clean_df[primary_trait].mean()
     m5.metric(f"Mean {primary_trait}", f"{mean_val:.2f}")
 
@@ -204,21 +249,22 @@ if uploaded_file is not None:
       with col_guide:
         st.markdown("""
                 #### Recommended Excel Column Structure:
-                To achieve seamless analysis without errors, structure your input Excel file with the following columns:
+                To achieve seamless analysis without errors, ensure your dataset includes:
                 
-                * **Female Line Column:** Name or ID of Female Parent (e.g., `Line_01`, `L_102`)
-                * **Male Tester Column:** Name or ID of Male Parent (e.g., `Tester_01`, `T_1`)
-                * **Environment / Location:** Trial location code (e.g., `Env_North`, `Loc_A`)
-                * **Replication / Block:** Numeric replication number (`1`, `2`, `3`)
+                * **Genotype ID Column:** Unique entry code or hybrid name (e.g., `G_01`, `Line_01 × Tester_01`).
+                * **Female Line Column:** Name or ID of Female Parent (e.g., `Line_01`, `L_102`).
+                * **Male Tester Column:** Name or ID of Male Parent (e.g., `Tester_01`, `T_1`).
+                * **Environment / Location:** Trial location code (e.g., `Env_North`, `Loc_A`).
+                * **Replication / Block:** Numeric replication number (`1`, `2`, `3`).
                 * **Quantitative Trait Columns:** Yield, Days to Flower, Plant Height, etc.
-                * *(Optional) SNP Marker Columns:* Prefix marker columns with `M_` (e.g., `M_Marker1`, `M_SNP002` scored as 0, 1, 2) for Genomic Selection (GEBV).
+                * *(Optional) Marker Columns:* Prefix molecular SNP columns with `M_` (e.g., `M_SNP001` scored 0, 1, 2) for Genomic Selection (GEBV).
                 """)
 
       with col_preview:
         st.write("#### Uploaded Data Sample (First 10 Rows)")
         st.dataframe(clean_df.head(10), use_container_width=True)
 
-      st.write("#### Data Summary Statistics")
+      st.write("#### Quantitative Trait Summary Statistics")
       st.dataframe(clean_df[trait_cols].describe().T, use_container_width=True)
 
     # ====================================================
@@ -256,7 +302,7 @@ if uploaded_file is not None:
 
       # 3. SCA Hybrids/Crosses
       cross_means = (
-          lt_data.groupby([line_col, tester_col])[primary_trait]
+          lt_data.groupby([line_col, tester_col, genotype_col])[primary_trait]
           .mean()
           .reset_index()
       )
@@ -269,26 +315,22 @@ if uploaded_file is not None:
           - cross_means["GCA_Female"]
           - cross_means["GCA_Male"]
       )
-      cross_means["Cross_Name"] = (
-          cross_means[line_col].astype(str)
-          + " × "
-          + cross_means[tester_col].astype(str)
-      )
 
       # Genomic Selection (GEBV) via Ridge Regression if markers exist
       has_gebv = False
-      if marker_cols:
+      if marker_cols and len(lt_data) > 5:
         try:
           X = lt_data[marker_cols].fillna(0)
           y = lt_data[primary_trait]
-          ridge_model = Ridge(alpha=1.0)
-          ridge_model.fit(X, y)
-          lt_data["Predicted_GEBV"] = ridge_model.predict(X)
-          has_gebv = True
+          if X.var().sum() > 0:  # Check non-zero marker variance
+            ridge_model = Ridge(alpha=1.0)
+            ridge_model.fit(X, y)
+            lt_data["Predicted_GEBV"] = ridge_model.predict(X)
+            has_gebv = True
         except Exception as e:
-          st.error(f"Could not calculate GEBV: {e}")
+          st.warning(f"GEBV calculation bypassed: {e}")
 
-      # VISUALIZATIONS (2D ONLY)
+      # VISUALIZATIONS
       c1, c2 = st.columns(2)
 
       with c1:
@@ -327,7 +369,7 @@ if uploaded_file is not None:
         fig_gcat.add_vline(x=0, line_dash="dash", line_color="black")
         st.plotly_chart(fig_gcat, use_container_width=True)
 
-      st.write("#### Hybrid Specific Combining Ability (SCA) Matrix Heatmap")
+      st.write("#### Specific Combining Ability (SCA) Matrix Heatmap")
       sca_pivot = cross_means.pivot(
           index=line_col, columns=tester_col, values="SCA_Cross"
       )
@@ -356,11 +398,10 @@ if uploaded_file is not None:
         )
         st.plotly_chart(fig_gebv, use_container_width=True)
 
-      # TABULAR DATA
-      st.write("#### 📄 Complete Parental & Cross Combining Ability Table")
+      st.write("#### 📄 Complete Combining Ability & EBV Table")
       st.dataframe(
           cross_means[[
-              "Cross_Name",
+              genotype_col,
               line_col,
               tester_col,
               primary_trait,
@@ -377,14 +418,13 @@ if uploaded_file is not None:
     with tab3:
       st.subheader("🌳 Genotypic Diversity & Cluster Analysis")
       st.markdown(
-          "Group parents into genetic clusters based on performance profiles"
-          " or molecular markers to avoid crossing closely related parents."
+          "Cluster genotypes into distinct genetic groups based on target traits"
+          " or molecular markers to optimize heterotic pairings."
       )
 
-      # Prepare matrix for clustering (either traits or markers)
       if marker_cols:
         cluster_source = st.radio(
-            "Clustering Based On:",
+            "Clustering Data Source:",
             ["Molecular Markers (M_)", "Phenotypic Trait Profiles"],
             horizontal=True,
         )
@@ -392,66 +432,83 @@ if uploaded_file is not None:
         cluster_source = "Phenotypic Trait Profiles"
 
       if cluster_source == "Molecular Markers (M_)":
-        feat_df = clean_df.groupby(line_col)[marker_cols].mean().fillna(0)
+        feat_df = (
+            clean_df.groupby(genotype_col)[marker_cols].mean().fillna(0)
+        )
       else:
         feat_df = (
-            clean_df.groupby(line_col)[trait_cols]
+            clean_df.groupby(genotype_col)[trait_cols]
             .mean()
             .fillna(clean_df[trait_cols].mean())
         )
 
-      # K-Means Number of Clusters
-      n_clusters = st.slider("Select Number of Genetic Clusters (K):", 2, 6, 3)
-
-      # PCA for 2D Visualization
-      pca = PCA(n_components=2)
-      coords_2d = pca.fit_transform(feat_df)
-
-      kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-      cluster_labels = kmeans.fit_predict(feat_df)
-
-      pca_df = pd.DataFrame({
-          line_col: feat_df.index,
-          "PC1": coords_2d[:, 0],
-          "PC2": coords_2d[:, 1],
-          "Cluster": [f"Cluster {c+1}" for c in cluster_labels],
-      })
-
-      col_div1, col_div2 = st.columns(2)
-
-      with col_div1:
-        st.write("#### 2D Genetic Diversity PCA Plot")
-        fig_pca_2d = px.scatter(
-            pca_df,
-            x="PC1",
-            y="PC2",
-            color="Cluster",
-            text=line_col,
-            title="2D Principal Component Diversity Space",
-            color_discrete_sequence=px.colors.qualitative.Set1,
-        )
-        fig_pca_2d.update_traces(
-            textposition="top center", marker=dict(size=12)
-        )
-        st.plotly_chart(fig_pca_2d, use_container_width=True)
-
-      with col_div2:
-        st.write("#### Pairwise Euclidean Distance Matrix Heatmap")
-        dist_matrix = squareform(pdist(feat_df, metric="euclidean"))
-        dist_df = pd.DataFrame(
-            dist_matrix, index=feat_df.index, columns=feat_df.index
+      if len(feat_df) >= 2:
+        max_k = min(6, len(feat_df))
+        n_clusters = st.slider(
+            "Select Number of Genetic Clusters (K):",
+            2,
+            max_k if max_k > 2 else 2,
+            min(3, max_k),
         )
 
-        fig_dist = px.imshow(
-            dist_df,
-            color_continuous_scale="Viridis_r",
-            title="Pairwise Distance Heatmap (Yellow = High Diversity)",
-            aspect="auto",
-        )
-        st.plotly_chart(fig_dist, use_container_width=True)
+        # 2D PCA Transformation
+        n_comp = min(2, feat_df.shape[1])
+        pca = PCA(n_components=n_comp)
+        coords_2d = pca.fit_transform(feat_df)
 
-      st.write("#### 📄 Cluster Assignment Table")
-      st.dataframe(pca_df.sort_values(by="Cluster"), use_container_width=True)
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        cluster_labels = kmeans.fit_predict(feat_df)
+
+        pca_df = pd.DataFrame({
+            genotype_col: feat_df.index,
+            "PC1": coords_2d[:, 0],
+            "PC2": (
+                coords_2d[:, 1]
+                if n_comp > 1
+                else np.zeros(len(coords_2d))
+            ),
+            "Cluster": [f"Cluster {c+1}" for c in cluster_labels],
+        })
+
+        col_div1, col_div2 = st.columns(2)
+
+        with col_div1:
+          st.write("#### 2D Genetic Diversity PCA Plot")
+          fig_pca_2d = px.scatter(
+              pca_df,
+              x="PC1",
+              y="PC2",
+              color="Cluster",
+              text=genotype_col,
+              title="2D Principal Component Space",
+              color_discrete_sequence=px.colors.qualitative.Set1,
+          )
+          fig_pca_2d.update_traces(
+              textposition="top center", marker=dict(size=12)
+          )
+          st.plotly_chart(fig_pca_2d, use_container_width=True)
+
+        with col_div2:
+          st.write("#### Pairwise Distance Heatmap")
+          dist_matrix = squareform(pdist(feat_df, metric="euclidean"))
+          dist_df = pd.DataFrame(
+              dist_matrix, index=feat_df.index, columns=feat_df.index
+          )
+
+          fig_dist = px.imshow(
+              dist_df,
+              color_continuous_scale="Viridis_r",
+              title="Pairwise Distance Heatmap (Yellow = Greater Diversity)",
+              aspect="auto",
+          )
+          st.plotly_chart(fig_dist, use_container_width=True)
+
+        st.write("#### 📄 Cluster Assignment Table")
+        st.dataframe(
+            pca_df.sort_values(by="Cluster"), use_container_width=True
+        )
+      else:
+        st.warning("⚠️ At least 2 genotypes are required for cluster analysis.")
 
     # ====================================================
     # TAB 4: GxE STABILITY (FINLAY-WILKINSON REGRESSION)
@@ -462,35 +519,34 @@ if uploaded_file is not None:
       )
       st.markdown(
           "**Finlay-Wilkinson Joint Regression Model:** Evaluates parental"
-          " yield potential vs environmental sensitivity ($\beta_i$ slope)."
+          " mean yield against environmental sensitivity (regression slope"
+          " $\\beta_i$)."
       )
 
-      # Calculate Environmental Index (mean of each location minus grand mean)
+      # Environmental Index = Location Mean - Grand Mean
       env_means = clean_df.groupby(env_col)[primary_trait].mean()
       grand_overall_mean = clean_df[primary_trait].mean()
       env_index = env_means - grand_overall_mean
 
-      # Finlay-Wilkinson Regression per Line
       fw_results = []
-      lines_list = clean_df[line_col].unique()
+      genotypes_list = clean_df[genotype_col].unique()
 
-      for l in lines_list:
-        sub = clean_df[clean_df[line_col] == l]
-        line_env_means = sub.groupby(env_col)[primary_trait].mean()
+      for g in genotypes_list:
+        sub = clean_df[clean_df[genotype_col] == g]
+        geno_env_means = sub.groupby(env_col)[primary_trait].mean()
 
-        # Align series
         aligned = (
-            pd.DataFrame({"Env_Index": env_index, "Line_Mean": line_env_means})
+            pd.DataFrame({"Env_Index": env_index, "Geno_Mean": geno_env_means})
             .dropna()
         )
 
-        if len(aligned) >= 2:
+        # Regression Guard: Requires >= 2 environments and non-zero x variance
+        if len(aligned) >= 2 and aligned["Env_Index"].std() > 1e-6:
           slope, intercept, r_val, p_val, std_err = linregress(
-              aligned["Env_Index"], aligned["Line_Mean"]
+              aligned["Env_Index"], aligned["Geno_Mean"]
           )
-          line_mean_trait = aligned["Line_Mean"].mean()
+          mean_perf = aligned["Geno_Mean"].mean()
 
-          # Classification
           if slope > 1.1:
             adapt = "Favorable Environment Specialist (High Sensitivity)"
           elif slope < 0.9:
@@ -499,66 +555,72 @@ if uploaded_file is not None:
             adapt = "Broadly Adapted (Stable Across Envs)"
 
           fw_results.append({
-              line_col: l,
-              "Mean_Performance": line_mean_trait,
+              genotype_col: g,
+              "Mean_Performance": mean_perf,
               "Regression_Slope_Beta": slope,
-              "R2_Fit": r_val**2,
+              "R2_Fit": r_val**2 if not np.isnan(r_val) else 0.0,
               "Adaptation_Category": adapt,
           })
 
       fw_df = pd.DataFrame(fw_results)
 
-      c_fw1, c_fw2 = st.columns(2)
+      if not fw_df.empty:
+        c_fw1, c_fw2 = st.columns(2)
 
-      with c_fw1:
-        st.write("#### Finlay-Wilkinson Adaptation Scatter Chart")
-        fig_fw_scatter = px.scatter(
-            fw_df,
-            x="Regression_Slope_Beta",
-            y="Mean_Performance",
-            color="Adaptation_Category",
-            text=line_col,
-            title="Yield Mean vs Environmental Sensitivity (Slope β)",
-            labels={
-                "Regression_Slope_Beta": "Environmental Sensitivity (Slope β)",
-                "Mean_Performance": f"Mean {primary_trait}",
-            },
-        )
-        fig_fw_scatter.add_vline(
-            x=1.0, line_dash="dash", annotation_text="Average Sensitivity β=1"
-        )
-        fig_fw_scatter.add_hline(
-            y=grand_overall_mean,
-            line_dash="dash",
-            annotation_text="Overall Mean",
-        )
-        fig_fw_scatter.update_traces(
-            textposition="top center", marker=dict(size=10)
-        )
-        st.plotly_chart(fig_fw_scatter, use_container_width=True)
+        with c_fw1:
+          st.write("#### Finlay-Wilkinson Adaptation Scatter Chart")
+          fig_fw_scatter = px.scatter(
+              fw_df,
+              x="Regression_Slope_Beta",
+              y="Mean_Performance",
+              color="Adaptation_Category",
+              text=genotype_col,
+              title="Yield Potential vs Environmental Sensitivity (Slope β)",
+              labels={
+                  "Regression_Slope_Beta": "Environmental Sensitivity (Slope β)",
+                  "Mean_Performance": f"Mean {primary_trait}",
+              },
+          )
+          fig_fw_scatter.add_vline(
+              x=1.0, line_dash="dash", annotation_text="Average Sensitivity β=1"
+          )
+          fig_fw_scatter.add_hline(
+              y=grand_overall_mean,
+              line_dash="dash",
+              annotation_text="Overall Mean",
+          )
+          fig_fw_scatter.update_traces(
+              textposition="top center", marker=dict(size=10)
+          )
+          st.plotly_chart(fig_fw_scatter, use_container_width=True)
 
-      with c_fw2:
-        st.write("#### Reaction Norm Plot Across Environments")
-        gxe_line_df = (
-            clean_df.groupby([line_col, env_col])[primary_trait]
-            .mean()
-            .reset_index()
-        )
-        fig_rn = px.line(
-            gxe_line_df,
-            x=env_col,
-            y=primary_trait,
-            color=line_col,
-            markers=True,
-            title="Reaction Norms Across Trial Locations",
-        )
-        st.plotly_chart(fig_rn, use_container_width=True)
+        with c_fw2:
+          st.write("#### Reaction Norm Plot Across Trial Locations")
+          gxe_line_df = (
+              clean_df.groupby([genotype_col, env_col])[primary_trait]
+              .mean()
+              .reset_index()
+          )
+          fig_rn = px.line(
+              gxe_line_df,
+              x=env_col,
+              y=primary_trait,
+              color=genotype_col,
+              markers=True,
+              title="Reaction Norms Across Environments",
+          )
+          st.plotly_chart(fig_rn, use_container_width=True)
 
-      st.write("#### 📄 Finlay-Wilkinson Stability & Adaptation Table")
-      st.dataframe(
-          fw_df.sort_values(by="Mean_Performance", ascending=False),
-          use_container_width=True,
-      )
+        st.write("#### 📄 Finlay-Wilkinson Stability Table")
+        st.dataframe(
+            fw_df.sort_values(by="Mean_Performance", ascending=False),
+            use_container_width=True,
+        )
+      else:
+        st.warning(
+            "⚠️ Finlay-Wilkinson model requires genotypes to be evaluated"
+            " across at least 2 distinct environments."
+        )
 
     # ====================================================
     # TAB 5: MULTI-TRAIT SELECTION INDEX
@@ -568,8 +630,8 @@ if uploaded_file is not None:
 
       if len(trait_cols) > 1:
         st.write(
-            "Assign relative economic weights to each target trait to calculate"
-            " a unified **Parental Selection Index Score**."
+            "Assign economic weights to target traits to build a consolidated"
+            " **Parental Selection Index**."
         )
 
         weights = {}
@@ -578,11 +640,13 @@ if uploaded_file is not None:
           with w_cols[idx]:
             weights[t] = st.slider(f"Weight for {t}:", -5.0, 5.0, 1.0, step=0.5)
 
-        # Standardize traits (Z-score)
-        parent_means = clean_df.groupby(line_col)[trait_cols].mean()
-        z_scores = (parent_means - parent_means.mean()) / parent_means.std()
+        parent_means = clean_df.groupby(genotype_col)[trait_cols].mean()
 
-        # Compute Index Score
+        # Z-score standardization
+        std_devs = parent_means.std()
+        std_devs[std_devs == 0] = 1.0
+        z_scores = (parent_means - parent_means.mean()) / std_devs
+
         index_scores = np.zeros(len(parent_means))
         for t in trait_cols:
           index_scores += z_scores[t] * weights[t]
@@ -595,15 +659,15 @@ if uploaded_file is not None:
         col_r1, col_r2 = st.columns(2)
 
         with col_r1:
-          st.write("#### Top Selected Parents by Selection Index Score")
+          st.write("#### Top Ranked Genotypes by Selection Index")
           fig_index_bar = px.bar(
               parent_means.head(10).reset_index(),
               x="Selection_Index_Score",
-              y=line_col,
+              y=genotype_col,
               orientation="h",
               color="Selection_Index_Score",
               color_continuous_scale="Viridis",
-              title="Top 10 Parents Ranked by Multi-Trait Index",
+              title="Top 10 Genotypes Ranked by Multi-Trait Index",
               text_auto=".2f",
           )
           fig_index_bar.update_layout(
@@ -612,29 +676,28 @@ if uploaded_file is not None:
           st.plotly_chart(fig_index_bar, use_container_width=True)
 
         with col_r2:
-          st.write("#### Multi-Trait Radar Profile (Top 5 Parents)")
-          top_5_lines = parent_means.head(5).index
-          radar_norm = (
-              parent_means[trait_cols] - parent_means[trait_cols].min()
-          ) / (
-              parent_means[trait_cols].max()
-              - parent_means[trait_cols].min()
-              + 1e-6
-          )
+          st.write("#### Multi-Trait Radar Profile (Top 5 Genotypes)")
+          top_5_geno = parent_means.head(5).index
+          min_val = parent_means[trait_cols].min()
+          max_val = parent_means[trait_cols].max()
+          diff = max_val - min_val
+          diff[diff == 0] = 1.0
+
+          radar_norm = (parent_means[trait_cols] - min_val) / diff
 
           fig_radar = go.Figure()
-          for line in top_5_lines:
+          for g in top_5_geno:
             fig_radar.add_trace(
                 go.Scatterpolar(
-                    r=radar_norm.loc[line].values,
+                    r=radar_norm.loc[g].values,
                     theta=trait_cols,
                     fill="toself",
-                    name=str(line),
+                    name=str(g),
                 )
             )
           fig_radar.update_layout(
               polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
-              title="Normalized Radar Comparison",
+              title="Normalized Trait Comparison Radar Plot",
           )
           st.plotly_chart(fig_radar, use_container_width=True)
 
@@ -687,7 +750,7 @@ if uploaded_file is not None:
       )
 
   except Exception as err:
-    st.error(f"❌ An error occurred during data analysis: {err}")
+    st.error(f"❌ An error occurred during data processing: {err}")
 
 else:
   st.info(
