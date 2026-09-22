@@ -49,7 +49,6 @@ def generate_sample_template():
           height_val = round(np.random.normal(110, 15), 1)
           days_flower = int(np.random.normal(65, 4))
 
-          # Simulated SNP markers (0, 1, 2)
           m1 = np.random.choice([0, 1, 2], p=[0.25, 0.5, 0.25])
           m2 = np.random.choice([0, 1, 2], p=[0.3, 0.4, 0.3])
           m3 = np.random.choice([0, 1, 2], p=[0.2, 0.6, 0.2])
@@ -119,7 +118,6 @@ if uploaded_file is not None:
 
     st.sidebar.header("⚙️ Column Mapping")
 
-    # 1. Genotype ID Option
     geno_idx = get_default_index(
         ["genotype", "entry", "hybrid", "variety"], cols, fallback=None
     )
@@ -132,7 +130,6 @@ if uploaded_file is not None:
         "Genotype / Entry ID Column:", genotype_options, index=selected_geno_idx
     )
 
-    # 2. Line & Tester Mapping
     line_idx = get_default_index(
         ["line", "female", "parent1", "mother"], cols, fallback=0
     )
@@ -155,19 +152,25 @@ if uploaded_file is not None:
     )
     rep_col = st.sidebar.selectbox("Replication / Block:", cols, index=rep_idx)
 
-    # Ensure parent identifiers are string types to prevent duplicate index type mismatches
-    df[line_col] = df[line_col].astype(str)
-    df[tester_col] = df[tester_col].astype(str)
-
-    # Resolve Genotype ID
-    if genotype_col_choice == "Auto-generate (Female × Male)":
-      df["Genotype_ID"] = (
-          df[line_col].astype(str) + " × " + df[tester_col].astype(str)
+    # Convert ID columns strictly to string and clean float representation (e.g., '101.0' -> '101')
+    def clean_str_col(series):
+      return (
+          series.astype(str)
+          .str.replace(r"\.0$", "", regex=True)
+          .str.strip()
       )
+
+    df[line_col] = clean_str_col(df[line_col])
+    df[tester_col] = clean_str_col(df[tester_col])
+    df[env_col] = clean_str_col(df[env_col])
+    df[rep_col] = clean_str_col(df[rep_col])
+
+    if genotype_col_choice == "Auto-generate (Female × Male)":
+      df["Genotype_ID"] = df[line_col] + " × " + df[tester_col]
       genotype_col = "Genotype_ID"
     else:
       genotype_col = genotype_col_choice
-      df[genotype_col] = df[genotype_col].astype(str)
+      df[genotype_col] = clean_str_col(df[genotype_col])
 
     # Trait and Marker Column Separation
     ignore_cols = [
@@ -204,9 +207,12 @@ if uploaded_file is not None:
 
     primary_trait = st.selectbox("🎯 Focus Trait for Prediction:", trait_cols)
 
-    # Numeric coercion for traits
+    # Force strict numeric conversion on all quantitative traits and molecular markers
     for t in trait_cols:
       df[t] = pd.to_numeric(df[t], errors="coerce")
+
+    for m in marker_cols:
+      df[m] = pd.to_numeric(df[m], errors="coerce")
 
     clean_df = df.dropna(
         subset=[env_col, genotype_col, primary_trait]
@@ -267,12 +273,13 @@ if uploaded_file is not None:
     with tab2:
       st.subheader(f"Parental Breeding Value & Combining Ability: {primary_trait}")
 
-      overall_trait_mean = clean_df[primary_trait].mean()
+      overall_trait_mean = float(clean_df[primary_trait].mean())
 
       # Female Lines GCA & EBV
       female_means = clean_df.groupby(line_col)[primary_trait].mean()
       gca_female = (female_means - overall_trait_mean).reset_index()
       gca_female.columns = [line_col, "GCA_Female"]
+      gca_female[line_col] = gca_female[line_col].astype(str)
       gca_female["EBV_Female"] = (
           overall_trait_mean + 2 * gca_female["GCA_Female"]
       )
@@ -284,6 +291,7 @@ if uploaded_file is not None:
       male_means = clean_df.groupby(tester_col)[primary_trait].mean()
       gca_male = (male_means - overall_trait_mean).reset_index()
       gca_male.columns = [tester_col, "GCA_Male"]
+      gca_male[tester_col] = gca_male[tester_col].astype(str)
       gca_male["EBV_Male"] = overall_trait_mean + 2 * gca_male["GCA_Male"]
       gca_male["Status"] = np.where(
           gca_male["GCA_Male"] >= 0, "Positive (+)", "Negative (-)"
@@ -295,6 +303,9 @@ if uploaded_file is not None:
           .mean()
           .reset_index()
       )
+      cross_df[line_col] = cross_df[line_col].astype(str)
+      cross_df[tester_col] = cross_df[tester_col].astype(str)
+
       cross_df = cross_df.merge(gca_female, on=line_col).merge(
           gca_male, on=tester_col
       )
@@ -311,21 +322,23 @@ if uploaded_file is not None:
 
       if marker_cols and len(clean_df) >= 10:
         try:
-          X = clean_df[marker_cols].fillna(0)
-          y = clean_df[primary_trait]
+          X = clean_df[marker_cols].fillna(0).apply(pd.to_numeric)
+          y = pd.to_numeric(clean_df[primary_trait])
           if X.var().sum() > 0:
             ridge = Ridge(alpha=1.0)
             ridge.fit(X, y)
             clean_df["Predicted_GEBV"] = ridge.predict(X)
             has_gebv = True
 
-            # Extract parent average marker GEBV
             parent_marker_df = (
-                clean_df.groupby(line_col)[marker_cols].mean().fillna(0)
+                clean_df.groupby(line_col)[marker_cols]
+                .mean()
+                .fillna(0)
+                .apply(pd.to_numeric)
             )
             parent_gebvs = ridge.predict(parent_marker_df)
             for p_name, g_val in zip(parent_marker_df.index, parent_gebvs):
-              parent_gebv_dict[str(p_name)] = g_val
+              parent_gebv_dict[str(p_name)] = float(g_val)
         except Exception as e:
           st.warning(f"Genomic model note: {e}")
 
@@ -368,7 +381,6 @@ if uploaded_file is not None:
         st.plotly_chart(fig_gcat, use_container_width=True)
 
       st.write("#### Specific Combining Ability (SCA) Matrix Heatmap")
-      # FIX: Replaced .pivot with .pivot_table to safely handle duplicate entries
       sca_pivot = cross_df.pivot_table(
           index=line_col,
           columns=tester_col,
@@ -408,7 +420,6 @@ if uploaded_file is not None:
           " offspring value for **all possible future parental crosses** ($P_1"           " \\times P_2$) before executing them in the field."
       )
 
-      # Unique list of candidate parents (string-cast)
       all_parents = sorted(
           list(
               set(clean_df[line_col].astype(str)).union(
@@ -417,74 +428,79 @@ if uploaded_file is not None:
           )
       )
 
-      # Build parental mean trait profile with duplicate index resolution
       line_trait_profile = clean_df.groupby(line_col)[trait_cols].mean()
       tester_trait_profile = clean_df.groupby(tester_col)[trait_cols].mean()
       parent_profile = (
           pd.concat([line_trait_profile, tester_trait_profile])
           .groupby(level=0)
           .mean()
+          .fillna(0)
+          .apply(pd.to_numeric)
       )
 
-      # Calculate parental breeding values
       parent_ebvs = {}
       for p in all_parents:
-        if p in gca_female[line_col].values:
-          parent_ebvs[p] = gca_female.loc[
-              gca_female[line_col] == p, "EBV_Female"
-          ].values[0]
-        elif p in gca_male[tester_col].values:
-          parent_ebvs[p] = gca_male.loc[
-              gca_male[tester_col] == p, "EBV_Male"
-          ].values[0]
+        p_str = str(p)
+        if p_str in gca_female[line_col].values:
+          parent_ebvs[p_str] = float(
+              gca_female.loc[
+                  gca_female[line_col] == p_str, "EBV_Female"
+              ].values[0]
+          )
+        elif p_str in gca_male[tester_col].values:
+          parent_ebvs[p_str] = float(
+              gca_male.loc[gca_male[tester_col] == p_str, "EBV_Male"].values[0]
+          )
         else:
-          parent_ebvs[p] = overall_trait_mean
+          parent_ebvs[p_str] = overall_trait_mean
 
-      # Pairwise combinations
       possible_crosses = list(itertools.combinations(all_parents, 2))
       cross_pred_data = []
 
-      # Compute pairwise distances for genetic divergence
+      # Force numeric float64 matrix for distance calculation
       parent_dist_matrix = squareform(
-          pdist(parent_profile.fillna(0), metric="euclidean")
+          pdist(parent_profile.values.astype(np.float64), metric="euclidean")
       )
       parent_dist_df = pd.DataFrame(
           parent_dist_matrix,
-          index=parent_profile.index,
-          columns=parent_profile.index,
+          index=parent_profile.index.astype(str),
+          columns=parent_profile.index.astype(str),
       )
 
       for p1, p2 in possible_crosses:
-        ebv1 = parent_ebvs.get(p1, overall_trait_mean)
-        ebv2 = parent_ebvs.get(p2, overall_trait_mean)
+        p1_str, p2_str = str(p1), str(p2)
+        ebv1 = parent_ebvs.get(p1_str, overall_trait_mean)
+        ebv2 = parent_ebvs.get(p2_str, overall_trait_mean)
 
-        mid_parent_ebv = (ebv1 + ebv2) / 2.0
+        mid_parent_ebv = float((ebv1 + ebv2) / 2.0)
 
-        # Divergence distance
-        if p1 in parent_dist_df.index and p2 in parent_dist_df.columns:
-          gen_dist = parent_dist_df.loc[p1, p2]
-          if isinstance(gen_dist, pd.Series):
-            gen_dist = gen_dist.iloc[0]
+        if p1_str in parent_dist_df.index and p2_str in parent_dist_df.columns:
+          val = parent_dist_df.loc[p1_str, p2_str]
+          gen_dist = (
+              float(val.iloc[0]) if isinstance(val, pd.Series) else float(val)
+          )
         else:
           gen_dist = 0.0
 
-        # GEBV prediction if markers available
-        if has_gebv and p1 in parent_gebv_dict and p2 in parent_gebv_dict:
-          predicted_cross_gebv = (
-              parent_gebv_dict[p1] + parent_gebv_dict[p2]
-          ) / 2.0
+        if (
+            has_gebv
+            and p1_str in parent_gebv_dict
+            and p2_str in parent_gebv_dict
+        ):
+          predicted_cross_gebv = float(
+              (parent_gebv_dict[p1_str] + parent_gebv_dict[p2_str]) / 2.0
+          )
         else:
           predicted_cross_gebv = mid_parent_ebv
 
-        # Check if cross was already tested in dataset
         tested_match = clean_df[
             (
-                (clean_df[line_col].astype(str) == p1)
-                & (clean_df[tester_col].astype(str) == p2)
+                (clean_df[line_col].astype(str) == p1_str)
+                & (clean_df[tester_col].astype(str) == p2_str)
             )
             | (
-                (clean_df[line_col].astype(str) == p2)
-                & (clean_df[tester_col].astype(str) == p1)
+                (clean_df[line_col].astype(str) == p2_str)
+                & (clean_df[tester_col].astype(str) == p1_str)
             )
         ]
         status = (
@@ -494,16 +510,23 @@ if uploaded_file is not None:
         )
 
         cross_pred_data.append({
-            "Predicted_Cross": f"{p1} × {p2}",
-            "Parent_1": p1,
-            "Parent_2": p2,
+            "Predicted_Cross": f"{p1_str} × {p2_str}",
+            "Parent_1": p1_str,
+            "Parent_2": p2_str,
             "Mid_Parent_EBV": mid_parent_ebv,
             "Predicted_GEBV": predicted_cross_gebv,
             "Parental_Divergence_Distance": gen_dist,
             "Status": status,
         })
 
-      pred_cross_df = pd.DataFrame(cross_pred_data).sort_values(
+      pred_cross_df = pd.DataFrame(cross_pred_data)
+      pred_cross_df["Predicted_GEBV"] = pd.to_numeric(
+          pred_cross_df["Predicted_GEBV"], errors="coerce"
+      )
+      pred_cross_df["Parental_Divergence_Distance"] = pd.to_numeric(
+          pred_cross_df["Parental_Divergence_Distance"], errors="coerce"
+      )
+      pred_cross_df = pred_cross_df.sort_values(
           by="Predicted_GEBV", ascending=False
       )
 
@@ -567,13 +590,17 @@ if uploaded_file is not None:
 
       if div_source == "Molecular Markers (M_)":
         div_feat_df = (
-            clean_df.groupby(genotype_col)[marker_cols].mean().fillna(0)
+            clean_df.groupby(genotype_col)[marker_cols]
+            .mean()
+            .fillna(0)
+            .apply(pd.to_numeric)
         )
       else:
         div_feat_df = (
             clean_df.groupby(genotype_col)[trait_cols]
             .mean()
             .fillna(clean_df[trait_cols].mean())
+            .apply(pd.to_numeric)
         )
 
       if len(div_feat_df) >= 2:
@@ -587,13 +614,13 @@ if uploaded_file is not None:
 
         n_comp = min(2, div_feat_df.shape[1])
         pca = PCA(n_components=n_comp)
-        coords = pca.fit_transform(div_feat_df)
+        coords = pca.fit_transform(div_feat_df.values.astype(np.float64))
 
         kmeans = KMeans(n_clusters=k_clusters, random_state=42, n_init=10)
-        clusters = kmeans.fit_predict(div_feat_df)
+        clusters = kmeans.fit_predict(div_feat_df.values.astype(np.float64))
 
         cluster_df = pd.DataFrame({
-            genotype_col: div_feat_df.index,
+            genotype_col: div_feat_df.index.astype(str),
             "PC1": coords[:, 0],
             "PC2": coords[:, 1] if n_comp > 1 else np.zeros(len(coords)),
             "Diversity_Cluster": [f"Cluster_{c+1}" for c in clusters],
@@ -619,9 +646,13 @@ if uploaded_file is not None:
 
         with col_d2:
           st.write("#### Pairwise Genetic Distance Matrix Heatmap")
-          dist_m = squareform(pdist(div_feat_df, metric="euclidean"))
+          dist_m = squareform(
+              pdist(div_feat_df.values.astype(np.float64), metric="euclidean")
+          )
           dist_df = pd.DataFrame(
-              dist_m, index=div_feat_df.index, columns=div_feat_df.index
+              dist_m,
+              index=div_feat_df.index.astype(str),
+              columns=div_feat_df.index.astype(str),
           )
 
           fig_hm = px.imshow(
@@ -654,12 +685,13 @@ if uploaded_file is not None:
       )
 
       env_means = clean_df.groupby(env_col)[primary_trait].mean()
-      grand_mean = clean_df[primary_trait].mean()
+      grand_mean = float(clean_df[primary_trait].mean())
       env_index = env_means - grand_mean
 
       fw_rows = []
       for g in clean_df[genotype_col].unique():
-        sub = clean_df[clean_df[genotype_col] == g]
+        g_str = str(g)
+        sub = clean_df[clean_df[genotype_col] == g_str]
         g_env_means = sub.groupby(env_col)[primary_trait].mean()
 
         aligned = (
@@ -667,11 +699,12 @@ if uploaded_file is not None:
             .dropna()
         )
 
-        if len(aligned) >= 2 and aligned["Env_Index"].std() > 1e-6:
+        if len(aligned) >= 2 and float(aligned["Env_Index"].std()) > 1e-6:
           slope, intercept, r_val, p_val, std_err = linregress(
-              aligned["Env_Index"], aligned["Geno_Mean"]
+              aligned["Env_Index"].values.astype(np.float64),
+              aligned["Geno_Mean"].values.astype(np.float64),
           )
-          mean_p = aligned["Geno_Mean"].mean()
+          mean_p = float(aligned["Geno_Mean"].mean())
 
           if slope > 1.1:
             cat = "Favorable Environment Specialist (β > 1.1)"
@@ -681,16 +714,23 @@ if uploaded_file is not None:
             cat = "Broadly Adapted / Stable (β ≈ 1.0)"
 
           fw_rows.append({
-              genotype_col: g,
+              genotype_col: g_str,
               "Mean_Performance": mean_p,
-              "Regression_Slope_Beta": slope,
-              "R2_Stability": r_val**2 if not np.isnan(r_val) else 0.0,
+              "Regression_Slope_Beta": float(slope),
+              "R2_Stability": float(r_val**2) if not np.isnan(r_val) else 0.0,
               "Adaptation_Category": cat,
           })
 
       fw_df = pd.DataFrame(fw_rows)
 
       if not fw_df.empty:
+        fw_df["Regression_Slope_Beta"] = pd.to_numeric(
+            fw_df["Regression_Slope_Beta"], errors="coerce"
+        )
+        fw_df["Mean_Performance"] = pd.to_numeric(
+            fw_df["Mean_Performance"], errors="coerce"
+        )
+
         c_fw1, c_fw2 = st.columns(2)
 
         with c_fw1:
@@ -762,7 +802,11 @@ if uploaded_file is not None:
           with w_cols[idx]:
             weights[t] = st.slider(f"Weight: {t}", -5.0, 5.0, 1.0, step=0.5)
 
-        parent_means = clean_df.groupby(genotype_col)[trait_cols].mean()
+        parent_means = (
+            clean_df.groupby(genotype_col)[trait_cols]
+            .mean()
+            .apply(pd.to_numeric)
+        )
         std_devs = parent_means.std()
         std_devs[std_devs == 0] = 1.0
         z_scores = (parent_means - parent_means.mean()) / std_devs
